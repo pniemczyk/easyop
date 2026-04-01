@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html" class="active">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Getting Started</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Getting Started</h1>
+
+      <h2 id="installation">Installation</h2>
+      <p>Add EasyOp to your <code>Gemfile</code>:</p>
+
+      <pre><code class="language-ruby">gem "easyop"</code></pre>
+
+      <p>Then run:</p>
+
+      <pre><code class="language-bash">bundle install</code></pre>
+
+      <p>EasyOp has no required runtime dependencies — it works in plain Ruby, Sinatra, or Rails.</p>
+
+      <h2 id="first-operation">Your First Operation</h2>
+      <p>An operation is any Ruby class that includes <code>Easyop::Operation</code> and defines a <code>call</code> method.</p>
+
+      <pre><code class="language-ruby">class DoubleNumber
+  include Easyop::Operation
+
+  def call
+    ctx.fail!(error: "input must be a number") unless ctx.number.is_a?(Numeric)
+    ctx.result = ctx.number * 2
+  end
+end</code></pre>
+
+      <p>Call it and inspect the result:</p>
+
+      <pre><code class="language-ruby">result = DoubleNumber.call(number: 21)
+result.success?   # => true
+result.result     # => 42
+
+result = DoubleNumber.call(number: "oops")
+result.failure?   # => true
+result.error      # => "input must be a number"</code></pre>
+
+      <p>Every operation:</p>
+      <ul>
+        <li>Receives input via <code>ctx</code> — the shared data bag</li>
+        <li>Writes output back to <code>ctx</code></li>
+        <li>Calls <code>ctx.fail!</code> to halt and mark failure</li>
+        <li>Returns <code>ctx</code> — the result object</li>
+      </ul>
+
+      <h2 id="call-vs-call-bang"><code>.call</code> vs <code>.call!</code></h2>
+      <p>EasyOp provides two entry points:</p>
+
+      <table>
+        <thead>
+          <tr><th>Method</th><th>On success</th><th>On <code>ctx.fail!</code></th><th>On unhandled exception</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>.call(attrs)</code></td>
+            <td>Returns ctx</td>
+            <td>Returns ctx (<code>ctx.failure? == true</code>)</td>
+            <td>Re-raises after setting <code>ctx.error</code></td>
+          </tr>
+          <tr>
+            <td><code>.call!(attrs)</code></td>
+            <td>Returns ctx</td>
+            <td>Raises <code>Easyop::Ctx::Failure</code></td>
+            <td>Re-raises (unhandled)</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <pre><code class="language-ruby"># Safe variant — check ctx.failure? afterwards
+result = DoubleNumber.call(number: "bad")
+result.failure?  # => true
+result.error     # => "input must be a number"
+
+# Bang variant — rescue the exception
+begin
+  result = DoubleNumber.call!(number: "bad")
+rescue Easyop::Ctx::Failure => e
+  e.ctx.error   # => "input must be a number"
+  e.message     # => "Operation failed: input must be a number"
+end</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Tip</strong>
+        Use <code>.call</code> in controllers where you want to handle failure inline. Use <code>.call!</code> in service objects or pipelines where the caller is responsible for error handling.
+      </div>
+
+      <h2 id="configuration">Configuration</h2>
+      <p>Configure EasyOp once, typically in an initializer:</p>
+
+      <pre><code class="language-ruby"># config/initializers/easyop.rb
+Easyop.configure do |c|
+  # Schema type validation mode:
+  #   false (default) — emit a warning on type mismatch, continue
+  #   true            — call ctx.fail! on type mismatch
+  c.strict_types = false
+
+  # Type adapter for schema validation:
+  #   :native       (default) — Ruby is_a? checks
+  #   :none         — skip type checking entirely
+  c.type_adapter = :native
+end</code></pre>
+
+      <h3 id="reset-config">Resetting Configuration</h3>
+      <p>In tests, reset configuration before each example to avoid state leakage:</p>
+
+      <pre><code class="language-ruby"># spec/spec_helper.rb
+RSpec.configure do |config|
+  config.before(:each) do
+    Easyop.reset_config!
+  end
+end</code></pre>
+
+      <p><code>Easyop.reset_config!</code> replaces the current config with a fresh <code>Configuration</code> instance using all defaults.</p>
+
+      <h2 id="adding-hooks">Adding Hooks</h2>
+      <p>Use <code>before</code>, <code>after</code>, and <code>around</code> to add lifecycle callbacks:</p>
+
+      <pre><code class="language-ruby">class NormalizeEmail
+  include Easyop::Operation
+
+  before :strip_whitespace
+  after  :log_result
+  around :with_timing
+
+  def call
+    ctx.normalized = ctx.email.downcase
+  end
+
+  private
+
+  def strip_whitespace
+    ctx.email = ctx.email.to_s.strip
+  end
+
+  def log_result
+    Rails.logger.info "Normalized: #{ctx.normalized}" if ctx.success?
+  end
+
+  def with_timing
+    t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield
+    ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
+    Rails.logger.info "NormalizeEmail took #{ms}ms"
+  end
+end
+
+result = NormalizeEmail.call(email: "  ALICE@EXAMPLE.COM  ")
+result.normalized  # => "alice@example.com"</code></pre>
+
+      <h2 id="typed-schema">Typed Schema</h2>
+      <p>Declare expected inputs and outputs with the <code>params</code> / <code>result</code> DSL:</p>
+
+      <pre><code class="language-ruby">class RegisterUser
+  include Easyop::Operation
+
+  params do
+    required :email, String
+    required :age,   Integer
+    optional :plan,  String,   default: "free"
+    optional :admin, :boolean, default: false
+  end
+
+  result do
+    required :user, User
+  end
+
+  def call
+    ctx.user = User.create!(ctx.slice(:email, :age, :plan))
+  end
+end
+
+result = RegisterUser.call(email: "alice@example.com", age: 30)
+result.success?  # => true
+result.plan      # => "free"  (default applied)
+
+result = RegisterUser.call(email: "bob@example.com")
+result.failure?  # => true
+result.error     # => "Missing required params field: age"</code></pre>
+
+      <h2 id="next-steps">Next Steps</h2>
+      <ul>
+        <li><a href="ctx.html">Ctx API Reference</a> — every method on the context object</li>
+        <li><a href="operations.html">Operations</a> — hooks, rescue_from, schemas, inheritance, plugins</li>
+        <li><a href="flows.html">Flows</a> — composing operations with rollback support</li>
+        <li><a href="testing.html">Testing Guide</a> — RSpec patterns for operations and flows</li>
+        <li><a href="rails.html">Rails Integration</a> — controller patterns and plugin setup</li>
+      </ul>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

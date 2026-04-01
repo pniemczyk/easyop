@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rails Integration — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html" class="active">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Rails Integration</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Rails Integration</h1>
+      <p>EasyOp integrates naturally with Rails. No generators required — just add a base class, configure plugins in an initializer, and choose a controller pattern that fits your team.</p>
+
+      <h2 id="application-operation">ApplicationOperation Base Class</h2>
+      <p>Create a base class in <code>app/operations/application_operation.rb</code>. All your operations inherit from it, sharing plugins and rescue handlers.</p>
+
+      <pre><code class="language-ruby"># app/operations/application_operation.rb
+class ApplicationOperation
+  include Easyop::Operation
+
+  rescue_from ActiveRecord::RecordNotFound do |e|
+    ctx.fail!(error: "#{e.model} not found")
+  end
+
+  rescue_from ActiveRecord::RecordInvalid do |e|
+    ctx.fail!(
+      error:  e.message,
+      errors: e.record.errors.to_h
+    )
+  end
+
+  rescue_from StandardError do |e|
+    Sentry.capture_exception(e)
+    ctx.fail!(error: "An unexpected error occurred")
+  end
+end</code></pre>
+
+      <h2 id="initializer">Initializer — Plugin Setup</h2>
+
+      <pre><code class="language-ruby"># config/initializers/easyop.rb
+require "easyop/plugins/instrumentation"
+require "easyop/plugins/recording"
+require "easyop/plugins/async"
+require "easyop/plugins/transactional"
+
+Easyop.configure do |c|
+  c.strict_types = Rails.env.development? || Rails.env.test?
+end
+
+class ApplicationOperation
+  plugin Easyop::Plugins::Instrumentation
+  plugin Easyop::Plugins::Recording,    model: OperationLog
+  plugin Easyop::Plugins::Async,        queue: "operations"
+  plugin Easyop::Plugins::Transactional
+end
+
+# Attach the built-in log subscriber:
+Easyop::Plugins::Instrumentation.attach_log_subscriber</code></pre>
+
+      <h2 id="operation-log-migration">OperationLog Migration</h2>
+
+      <pre><code class="language-ruby"># db/migrate/20240101000000_create_operation_logs.rb
+class CreateOperationLogs &lt; ActiveRecord::Migration[7.1]
+  def change
+    create_table :operation_logs do |t|
+      t.string   :operation_name, null: false
+      t.boolean  :success,        null: false
+      t.string   :error_message
+      t.text     :params_data          # JSON — sensitive keys scrubbed automatically
+      t.float    :duration_ms
+      t.datetime :performed_at,   null: false
+    end
+
+    add_index :operation_logs, :operation_name
+    add_index :operation_logs, :performed_at
+    add_index :operation_logs, :success
+  end
+end</code></pre>
+
+      <h2 id="controller-pattern-1">Pattern 1 — Inline Callbacks</h2>
+      <p>The simplest pattern. Chain <code>.on_success</code> and <code>.on_failure</code> directly on the result.</p>
+
+      <pre><code class="language-ruby">class UsersController &lt; ApplicationController
+  def create
+    Users::Register.call(user_params)
+      .on_success { |ctx| redirect_to profile_path(ctx.user), notice: "Welcome!" }
+      .on_failure { |ctx| render :new, locals: { errors: ctx.errors }, status: :unprocessable_entity }
+  end
+
+  private
+
+  def user_params
+    params.require(:user).permit(:email, :name, :password)
+  end
+end</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Best for</strong>
+        Simple actions where the success/failure logic fits naturally in a one-liner.
+      </div>
+
+      <h2 id="controller-pattern-2">Pattern 2 — prepare and bind_with</h2>
+      <p>Pre-register named methods as callbacks. The cleanest pattern for controllers with non-trivial response logic.</p>
+
+      <pre><code class="language-ruby">class CheckoutsController &lt; ApplicationController
+  def create
+    ProcessCheckout.prepare
+      .bind_with(self)
+      .on(success: :checkout_complete, fail: :checkout_failed)
+      .call(
+        user:          current_user,
+        cart:          current_cart,
+        payment_token: params[:stripe_token],
+        coupon_code:   params[:coupon_code]
+      )
+  end
+
+  private
+
+  def checkout_complete(ctx)
+    redirect_to order_path(ctx.order), notice: "Order placed! Confirmation sent to #{current_user.email}."
+  end
+
+  def checkout_failed(ctx)
+    flash.now[:error] = ctx.error
+    render :new, status: :unprocessable_entity
+  end
+end</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Best for</strong>
+        Controllers where success and failure require multiple lines, redirects, or render calls. Keeps the action method clean and delegates rendering to named private methods.
+      </div>
+
+      <h3>Zero-arity methods</h3>
+      <p>If your callback methods don't need ctx, omit the argument:</p>
+      <pre><code class="language-ruby">def checkout_complete
+  redirect_to orders_path, notice: "Order placed!"
+end</code></pre>
+
+      <h2 id="controller-pattern-3">Pattern 3 — Pattern Matching</h2>
+      <p>Ruby 3+ pattern matching reads naturally for multi-branch responses.</p>
+
+      <pre><code class="language-ruby">class UsersController &lt; ApplicationController
+  def create
+    case Users::Register.call(user_params)
+    in { success: true, user: User => user }
+      sign_in(user)
+      redirect_to dashboard_path, notice: "Welcome to the app!"
+    in { success: false, errors: Hash => errs } if errs.any?
+      @errors = errs
+      render :new, status: :unprocessable_entity
+    in { success: false, error: String => msg }
+      flash.now[:alert] = msg
+      render :new, status: :unprocessable_entity
+    end
+  end
+
+  private
+
+  def user_params
+    params.require(:user).permit(:email, :name, :password, :password_confirmation)
+  end
+end</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Best for</strong>
+        Complex response branches where different failure modes require different responses (e.g., validation errors vs. authorization failures vs. unexpected errors).
+      </div>
+
+      <h2 id="call-bang-with-rescue">Pattern 4 — .call! with rescue</h2>
+      <p>Use when an outer mechanism handles all errors — e.g., a <code>rescue_from</code> in <code>ApplicationController</code>.</p>
+
+      <pre><code class="language-ruby">class ApplicationController &lt; ActionController::Base
+  rescue_from Easyop::Ctx::Failure do |e|
+    respond_to do |format|
+      format.html { redirect_back fallback_location: root_path, alert: e.ctx.error }
+      format.json { render json: { error: e.ctx.error, errors: e.ctx.errors }, status: :unprocessable_entity }
+    end
+  end
+end
+
+class OrdersController &lt; ApplicationController
+  def create
+    ctx = ProcessOrder.call!(order_params)
+    redirect_to order_path(ctx.order), notice: "Order created!"
+  end
+end</code></pre>
+
+      <div class="callout callout-warning">
+        <strong>Use with care</strong>
+        <code>.call!</code> is best for simple actions where you are OK with a generic error response for all failures. For fine-grained failure handling, prefer patterns 1, 2, or 3.
+      </div>
+
+      <h2 id="full-controller-example">Full Controller Example</h2>
+      <p>A real-world controller for a checkout flow using Pattern 2:</p>
+
+      <pre><code class="language-ruby"># app/controllers/checkouts_controller.rb
+class CheckoutsController &lt; ApplicationController
+  before_action :authenticate_user!
+
+  def new
+    @cart = current_user.cart
+  end
+
+  def create
+    ProcessCheckout.prepare
+      .bind_with(self)
+      .on(success: :order_created, fail: :order_failed)
+      .call(
+        user:          current_user,
+        cart:          current_cart,
+        payment_token: params[:stripe_token],
+        coupon_code:   params[:coupon_code].presence
+      )
+  end
+
+  private
+
+  def order_created(ctx)
+    session.delete(:cart_id)
+    redirect_to order_path(ctx.order), notice: "Order ##{ctx.order.id} placed successfully!"
+  end
+
+  def order_failed(ctx)
+    flash.now[:error] = ctx.error
+    @cart = current_cart
+    @errors = ctx.errors
+    render :new, status: :unprocessable_entity
+  end
+end</code></pre>
+
+      <h2 id="operation-organization">Operation Organization</h2>
+      <p>A suggested directory structure for a mid-size Rails app:</p>
+
+      <pre><code class="language-bash">app/
+  operations/
+    application_operation.rb    # base class
+    users/
+      register.rb               # Users::Register
+      authenticate.rb           # Users::Authenticate
+      update_profile.rb         # Users::UpdateProfile
+    orders/
+      process_checkout.rb       # Orders::ProcessCheckout (flow)
+      validate_cart.rb
+      charge_payment.rb
+      create_order.rb
+      send_confirmation.rb
+    reports/
+      generate_pdf.rb</code></pre>
+
+      <h2 id="api-controllers">API Controllers</h2>
+      <p>For JSON APIs, pattern matching on the result works well:</p>
+
+      <pre><code class="language-ruby">class Api::V1::UsersController &lt; Api::BaseController
+  def create
+    case Users::Register.call(user_params)
+    in { success: true, user: }
+      render json: UserSerializer.new(user), status: :created
+    in { success: false, errors: Hash => errs } if errs.any?
+      render json: { errors: errs }, status: :unprocessable_entity
+    in { success: false, error: String => msg }
+      render json: { error: msg }, status: :unprocessable_entity
+    end
+  end
+end</code></pre>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

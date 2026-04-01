@@ -1,0 +1,27 @@
+<% content_for :title, "Send Newsletter Broadcast" %>
+
+<h1>Publish & Broadcast</h1>
+
+<p>This will publish the article <strong>"<%= @article.title %>"</strong> and send a newsletter broadcast to all confirmed subscribers.</p>
+
+<% if @article.published? %>
+  <div class="alert">This article is already published. Sending a broadcast only.</div>
+<% end %>
+
+<%= form_with url: article_broadcasts_path(@article), scope: :broadcast do |f| %>
+  <label>Email Subject
+    <%= f.text_field :subject, placeholder: "e.g. New Post: #{@article.title}", value: "New Post: #{@article.title}" %>
+  </label>
+
+  <p><small>The article body will be used as the email body.</small></p>
+
+  <br>
+  <label style="display: flex; align-items: center; gap: 0.5rem;">
+    <%= check_box_tag :async, "1", false %>
+    <span>Send in background (async)</span>
+  </label>
+
+  <br>
+  <%= f.submit "Publish & Send Broadcast", class: "btn" %>
+  <%= link_to "Cancel", article_path(@article), class: "btn" %>
+<% end %>

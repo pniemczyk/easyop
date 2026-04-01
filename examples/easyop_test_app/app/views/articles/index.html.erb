@@ -1,0 +1,29 @@
+<% content_for :title, "Articles - EasyOp Blog" %>
+
+<h1>Published Articles</h1>
+
+<% if @articles.any? %>
+  <% @articles.each do |article| %>
+    <article class="post">
+      <h2><%= link_to article.title, article_path(article) %></h2>
+      <p><small>By <%= article.user.name %> &mdash; <%= article.published_at&.strftime("%B %d, %Y") %></small></p>
+      <p><%= truncate(article.body, length: 200) %></p>
+    </article>
+  <% end %>
+<% else %>
+  <p>No published articles yet. <%= logged_in? ? link_to("Write the first one!", new_article_path) : "Check back soon." %></p>
+<% end %>
+
+<% if logged_in? && @drafts.any? %>
+  <hr>
+  <h2>Your Drafts</h2>
+  <% @drafts.each do |article| %>
+    <article class="post">
+      <h2>
+        <%= link_to article.title, article_path(article) %>
+        <span class="badge badge-draft">draft</span>
+      </h2>
+      <p><small>Created <%= article.created_at.strftime("%B %d, %Y") %></small></p>
+    </article>
+  <% end %>
+<% end %>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyOp Docs — Overview</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html" class="active">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">
+      &#9654; GitHub
+    </a>
+  </div>
+</aside>
+
+<!-- Top bar -->
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">&rsaquo;</span>
+  <span class="topbar-current">Overview</span>
+</div>
+
+<!-- Main wrapper -->
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <div class="hero">
+        <h1>EasyOp — Joyful, composable business logic for Ruby</h1>
+        <p>Wrap every piece of business logic in a small, testable operation object. Compose operations into flows. Never entangle controllers or models with complex logic again.</p>
+        <div class="hero-buttons">
+          <a href="getting-started.html" class="btn btn-primary">Get Started</a>
+          <a href="https://github.com/pniemczyk/easyop" class="btn btn-secondary">View on GitHub</a>
+        </div>
+      </div>
+
+      <h2 id="quick-example">Quick Example</h2>
+      <p>An operation is any Ruby class that includes <code>Easyop::Operation</code> and defines a <code>call</code> method. The shared context <code>ctx</code> is the input carrier and result object.</p>
+
+      <pre><code class="language-ruby">class AuthenticateUser
+  include Easyop::Operation
+
+  def call
+    user = User.authenticate(ctx.email, ctx.password)
+    ctx.fail!(error: "Invalid credentials") unless user
+    ctx.user = user
+  end
+end
+
+result = AuthenticateUser.call(email: "alice@example.com", password: "hunter2")
+result.success?   # => true
+result.user       # => #&lt;User id=1&gt;
+
+result = AuthenticateUser.call(email: "bob@example.com", password: "wrong")
+result.failure?   # => true
+result.error      # => "Invalid credentials"</code></pre>
+
+      <h2 id="features">Features</h2>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <span class="feature-icon">⚙️</span>
+          <h3>Operation</h3>
+          <p>Pure Ruby objects with a <code>call</code> method, typed schemas, hooks, and error handling. No framework required.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-icon">🔗</span>
+          <h3>Flow</h3>
+          <p>Compose operations in sequence sharing one context. Automatic rollback on failure. Conditional <code>skip_if</code> steps.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-icon">&#x1F527;</span>
+          <h3>Hooks</h3>
+          <p><code>before</code>, <code>after</code>, and <code>around</code> hooks with inheritance. Works without ActiveSupport.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-icon">📋</span>
+          <h3>Schema</h3>
+          <p>Optional typed <code>params</code> / <code>result</code> declarations. Catches missing or wrong-type inputs before <code>call</code> runs.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-icon">🔌</span>
+          <h3>Plugins</h3>
+          <p>Instrumentation, Recording, Async, Transactional — opt-in, inheritable, composable.</p>
+        </div>
+        <div class="feature-card">
+          <span class="feature-icon">🧪</span>
+          <h3>Testing</h3>
+          <p>Operations are plain Ruby objects. Call them directly in specs — no stubs, no HTTP, no framework needed.</p>
+        </div>
+      </div>
+
+      <h2 id="how-it-works">How It Works</h2>
+      <p>Every operation receives a <strong>ctx</strong> — a Hash-backed object with method-style attribute access. Your code reads inputs from ctx and writes outputs back to it. When something goes wrong, call <code>ctx.fail!</code> to halt and mark the operation as failed.</p>
+      <p>The caller receives ctx as the result and inspects <code>ctx.success?</code> or <code>ctx.failure?</code>. No exceptions are raised unless you use the bang variant <code>.call!</code>.</p>
+
+      <pre><code class="language-ruby"># .call  — returns ctx, never raises on ctx.fail!
+result = MyOp.call(input: "data")
+result.success?   # => true or false
+result.some_attr  # => whatever the op set
+
+# .call! — returns ctx on success, raises Easyop::Ctx::Failure on fail!
+begin
+  result = MyOp.call!(input: "data")
+rescue Easyop::Ctx::Failure => e
+  e.ctx.error   # => the error message
+  e.message     # => "Operation failed: the error message"
+end</code></pre>
+
+      <h2 id="flow-overview">Flow: Composing Operations</h2>
+      <p>A <code>Flow</code> runs operations in sequence, sharing one ctx. Any failure halts the chain and triggers rollback of completed steps.</p>
+
+      <pre><code class="language-ruby">class ProcessCheckout
+  include Easyop::Flow
+
+  flow ValidateCart,
+       ApplyCoupon,      # declared skip_if — skipped when no coupon_code
+       ChargePayment,    # defines rollback — refunds on failure
+       CreateOrder,
+       SendConfirmation
+end
+
+result = ProcessCheckout.call(user: current_user, cart: current_cart)
+result.success?  # => true
+result.order     # => #&lt;Order id=42&gt;</code></pre>
+
+      <h2 id="module-map">Module Map</h2>
+      <table>
+        <thead>
+          <tr><th>Module</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>Easyop::Operation</code></td><td>Core mixin — include in any class</td></tr>
+          <tr><td><code>Easyop::Flow</code></td><td>Sequential operation chain with rollback</td></tr>
+          <tr><td><code>Easyop::FlowBuilder</code></td><td>Builder returned by <code>FlowClass.prepare</code></td></tr>
+          <tr><td><code>Easyop::Ctx</code></td><td>Shared context + result object</td></tr>
+          <tr><td><code>Easyop::Ctx::Failure</code></td><td>Exception raised by <code>ctx.fail!</code></td></tr>
+          <tr><td><code>Easyop::Hooks</code></td><td>before/after/around hook system</td></tr>
+          <tr><td><code>Easyop::Rescuable</code></td><td><code>rescue_from</code> DSL</td></tr>
+          <tr><td><code>Easyop::Skip</code></td><td><code>skip_if</code> for conditional flow steps</td></tr>
+          <tr><td><code>Easyop::Schema</code></td><td>Typed params/result DSL</td></tr>
+          <tr><td><code>Easyop::Plugins::Instrumentation</code></td><td>ActiveSupport::Notifications events</td></tr>
+          <tr><td><code>Easyop::Plugins::Recording</code></td><td>Persists executions to ActiveRecord</td></tr>
+          <tr><td><code>Easyop::Plugins::Async</code></td><td>Background jobs via ActiveJob</td></tr>
+          <tr><td><code>Easyop::Plugins::Transactional</code></td><td>DB transaction wrapper</td></tr>
+        </tbody>
+      </table>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+
+  // Add language badges
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) {
+      const badge = document.createElement('span');
+      badge.className = 'lang-badge';
+      badge.textContent = lang;
+      block.parentElement.appendChild(badge);
+    }
+  });
+
+  // Build TOC
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a');
+    a.href = '#' + h.id;
+    a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2';
+    toc.appendChild(a);
+  });
+
+  // Scroll spy
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      const id = e.target.id;
+      const link = toc.querySelector(`a[href="#${id}"]`);
+      if (link) link.classList.toggle('active', e.isIntersecting);
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+
+  // Copy buttons
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.title = 'Copy to clipboard';
+    btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    btn.onclick = () => {
+      navigator.clipboard.writeText(block.textContent);
+      btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'; btn.classList.remove('copied'); }, 2000);
+    };
+    block.parentElement.style.position = 'relative';
+    block.parentElement.appendChild(btn);
+  });
+
+  // Add anchor links to h2
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a');
+    a.className = 'anchor-icon';
+    a.href = '#' + h.id;
+    a.innerHTML = '#';
+    h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

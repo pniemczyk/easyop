@@ -1,0 +1,33 @@
+<% content_for :title, "New Article" %>
+
+<h1>Write a New Article</h1>
+
+<% if @errors&.any? %>
+  <div class="errors">
+    <strong>Please fix these errors:</strong>
+    <ul>
+      <% @errors.each do |field, message| %>
+        <li><%= field.to_s.humanize %>: <%= message %></li>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<%= form_with url: articles_path, model: @article do |f| %>
+  <label>Title
+    <%= f.text_field :title, placeholder: "Enter article title..." %>
+  </label>
+
+  <label>Body
+    <%= f.text_area :body, placeholder: "Write your article here..." %>
+  </label>
+
+  <label style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;">
+    <%= f.check_box :published, {}, "1", "0" %>
+    <span>Publish immediately</span>
+  </label>
+
+  <br>
+  <%= f.submit "Save Article", class: "btn" %>
+  <%= link_to "Cancel", articles_path, class: "btn" %>
+<% end %>

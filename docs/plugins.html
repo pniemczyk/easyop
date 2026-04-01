@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plugins — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html" class="active">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Plugins</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Plugins</h1>
+      <p>EasyOp has an opt-in plugin system. Plugins extend the operation lifecycle via the <code>plugin</code> DSL. They are not required automatically — require each plugin file before using it.</p>
+
+      <h2 id="activation">Activation</h2>
+
+      <pre><code class="language-ruby">require "easyop/plugins/instrumentation"
+require "easyop/plugins/recording"
+require "easyop/plugins/async"
+require "easyop/plugins/transactional"
+
+class ApplicationOperation
+  include Easyop::Operation
+
+  plugin Easyop::Plugins::Instrumentation
+  plugin Easyop::Plugins::Recording,    model: OperationLog
+  plugin Easyop::Plugins::Async,        queue: "operations"
+  plugin Easyop::Plugins::Transactional
+end
+
+# All subclasses inherit these plugins automatically:
+class CreateUser &lt; ApplicationOperation
+  def call; ctx.user = User.create!(email: ctx.email); end
+end</code></pre>
+
+      <h2 id="execution-order">Plugin Execution Order</h2>
+      <p>Plugins wrap <code>_easyop_run</code> via Ruby's <code>prepend</code>. The last installed plugin is the outermost wrapper:</p>
+
+      <pre><code class="language-ruby"># Installation order: Instrumentation → Recording → Async → Transactional
+#
+# Execution order (outermost first):
+#
+#  Transactional (outermost — last installed)
+#    Recording::RunWrapper
+#      Instrumentation::RunWrapper
+#        prepare { before → call → after }  (innermost)
+#
+# This means:
+# - The DB transaction opens first and closes last (wraps everything)
+# - Recording measures wall time including transaction overhead
+# - The Instrumentation event fires inside the transaction + recording window
+# - Async only adds .call_async — it does NOT wrap _easyop_run</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Tip</strong>
+        Install Transactional <em>last</em> if you want it to be the outermost wrapper. This ensures the transaction contains the complete operation lifecycle including recording and instrumentation.
+      </div>
+
+      <h2 id="instrumentation">Plugin: Instrumentation</h2>
+      <p>Emits an <code>ActiveSupport::Notifications</code> event after every operation call. Requires ActiveSupport (included with Rails).</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/instrumentation"
+
+class ApplicationOperation
+  include Easyop::Operation
+  plugin Easyop::Plugins::Instrumentation
+end</code></pre>
+
+      <h3>Event</h3>
+      <p>Event name: <code>"easyop.operation.call"</code></p>
+
+      <table>
+        <thead>
+          <tr><th>Payload key</th><th>Type</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>:operation</code></td><td>String</td><td>Class name, e.g. <code>"Users::Register"</code></td></tr>
+          <tr><td><code>:success</code></td><td>Boolean</td><td><code>true</code> unless <code>ctx.fail!</code> was called</td></tr>
+          <tr><td><code>:error</code></td><td>String | nil</td><td><code>ctx.error</code> on failure, <code>nil</code> on success</td></tr>
+          <tr><td><code>:duration</code></td><td>Float</td><td>Elapsed milliseconds</td></tr>
+          <tr><td><code>:ctx</code></td><td>Easyop::Ctx</td><td>The result object</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Built-in log subscriber</h3>
+      <pre><code class="language-ruby"># config/initializers/easyop.rb
+Easyop::Plugins::Instrumentation.attach_log_subscriber
+# Output: "[EasyOp] Users::Register ok (4.2ms)"
+# Output: "[EasyOp] Users::Authenticate FAILED (1.1ms) — Invalid email or password"</code></pre>
+
+      <h3>Manual subscribe</h3>
+      <pre><code class="language-ruby">ActiveSupport::Notifications.subscribe("easyop.operation.call") do |event|
+  p = event.payload
+  MyAPM.record_span(
+    p[:operation],
+    success:  p[:success],
+    error:    p[:error],
+    duration: p[:duration]
+  )
+end</code></pre>
+
+      <h2 id="recording">Plugin: Recording</h2>
+      <p>Persists every operation execution to an ActiveRecord model. Useful for audit trails, debugging, and performance monitoring.</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/recording"
+
+class ApplicationOperation
+  include Easyop::Operation
+  plugin Easyop::Plugins::Recording, model: OperationLog
+end</code></pre>
+
+      <h3>Options</h3>
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>model:</code></td><td>required</td><td>ActiveRecord class to write records into</td></tr>
+          <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Set <code>false</code> to skip params_data serialization</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Migration</h3>
+      <pre><code class="language-ruby">create_table :operation_logs do |t|
+  t.string   :operation_name, null: false
+  t.boolean  :success,        null: false
+  t.string   :error_message
+  t.text     :params_data         # JSON — ctx attrs with sensitive keys scrubbed
+  t.float    :duration_ms
+  t.datetime :performed_at,   null: false
+end</code></pre>
+
+      <h3>Scrubbed keys</h3>
+      <p>These keys are never written to <code>params_data</code>: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code>.</p>
+      <p>ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code> rather than their full representation.</p>
+
+      <h3>Opting out</h3>
+      <pre><code class="language-ruby"># Disable recording for this class only:
+class Newsletter::SendBroadcast &lt; ApplicationOperation
+  recording false
+end
+
+# Re-enable in a subclass when parent has recording disabled:
+class ImportantOp &lt; BaseWithNoRecording
+  recording true
+end
+
+# Skip params serialization for high-frequency or sensitive operations:
+class Users::TrackPageView &lt; ApplicationOperation
+  plugin Easyop::Plugins::Recording, model: OperationLog, record_params: false
+end</code></pre>
+
+      <p>Recording failures are silently swallowed — a failed database write never breaks the operation.</p>
+
+      <h2 id="async">Plugin: Async</h2>
+      <p>Adds <code>.call_async</code> to any operation class, enqueuing execution as an ActiveJob. Requires ActiveJob (included with Rails).</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/async"
+
+class Reports::GeneratePDF &lt; ApplicationOperation
+  plugin Easyop::Plugins::Async, queue: "reports"
+end</code></pre>
+
+      <h3>Enqueueing</h3>
+      <pre><code class="language-ruby"># Enqueue immediately (default queue):
+Reports::GeneratePDF.call_async(report_id: 123)
+
+# Override queue at call time:
+Reports::GeneratePDF.call_async(report_id: 123, queue: "low_priority")
+
+# Delay execution:
+Reports::GeneratePDF.call_async(report_id: 123, wait: 10.minutes)
+
+# Schedule at a specific time:
+Reports::GeneratePDF.call_async(report_id: 123, wait_until: Date.tomorrow.noon)</code></pre>
+
+      <h3>Scheduling options</h3>
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>queue:</code></td><td>Override the queue (default from plugin install)</td></tr>
+          <tr><td><code>wait:</code></td><td>Delay (e.g. <code>5.minutes</code>)</td></tr>
+          <tr><td><code>wait_until:</code></td><td>Schedule at exact time</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Queue inheritance</h3>
+      <pre><code class="language-ruby">class BaseOp
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async, queue: "operations"
+end
+
+class ChildOp &lt; BaseOp
+  def call; end
+end
+
+ChildOp._async_default_queue  # => "operations"  (inherited from parent)</code></pre>
+
+      <h3>ActiveRecord serialization</h3>
+      <pre><code class="language-ruby"># AR objects are serialized as { "__ar_class" => "Order", "__ar_id" => 42 }
+# and re-fetched via Order.find(42) in the job:
+Orders::SendConfirmation.call_async(order: @order, user: current_user)
+
+# Only pass serializable values:
+# String, Integer, Float, Boolean, nil, Hash, Array, ActiveRecord::Base</code></pre>
+
+      <h3>Job class</h3>
+      <pre><code class="language-ruby"># Easyop::Plugins::Async::Job is created lazily on first .call_async call
+# This means you can require the plugin before ActiveJob loads
+Easyop::Plugins::Async::Job  # => the ActiveJob subclass (after first call_async)</code></pre>
+
+      <h2 id="transactional">Plugin: Transactional</h2>
+      <p>Wraps every operation call in a database transaction. Supports ActiveRecord and Sequel — adapter is detected automatically.</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/transactional"
+
+# On a specific operation:
+class TransferFunds &lt; ApplicationOperation
+  plugin Easyop::Plugins::Transactional
+
+  def call
+    ctx.from_account.debit!(ctx.amount)
+    ctx.to_account.credit!(ctx.amount)
+    ctx.transaction_id = SecureRandom.uuid
+  end
+end
+
+# Globally — all subclasses get transactions:
+class ApplicationOperation
+  include Easyop::Operation
+  plugin Easyop::Plugins::Transactional
+end</code></pre>
+
+      <h3>Opting out</h3>
+      <pre><code class="language-ruby">class ReadOnlyReport &lt; ApplicationOperation
+  transactional false   # no transaction overhead for read-only ops
+end</code></pre>
+
+      <h3>Include style (also works)</h3>
+      <pre><code class="language-ruby">class LegacyOp
+  include Easyop::Operation
+  include Easyop::Plugins::Transactional
+end</code></pre>
+
+      <h3>Lifecycle scope</h3>
+      <p>The transaction wraps the entire <code>prepare</code> chain — before hooks, <code>call</code>, and after hooks all run inside the same transaction. If <code>ctx.fail!</code> is called (raising <code>Ctx::Failure</code>), the transaction rolls back.</p>
+
+      <h3>With Flow</h3>
+      <pre><code class="language-ruby"># Applied per-step: each step gets its own transaction
+class ProcessOrder
+  include Easyop::Flow
+  flow ValidateCart, ChargePayment, CreateOrder  # each step has its own transaction
+end
+
+# For a flow-wide transaction, apply it to the Flow class itself:
+class ProcessOrder
+  include Easyop::Flow
+  plugin Easyop::Plugins::Transactional  # entire flow in one transaction
+
+  flow ValidateCart, ChargePayment, CreateOrder
+end</code></pre>
+
+      <h2 id="custom-plugin">Building a Custom Plugin</h2>
+      <p>A plugin is any object responding to <code>.install(base_class, **options)</code>. Inherit from <code>Easyop::Plugins::Base</code> for a clean interface.</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/base"
+
+module TimingPlugin
+  def self.install(base, threshold_ms: 500, **_opts)
+    base.prepend(RunWrapper)
+    base.extend(ClassMethods)
+    base.instance_variable_set(:@_timing_threshold_ms, threshold_ms)
+  end
+
+  module ClassMethods
+    # Per-class DSL: `timing false` to disable
+    def timing(enabled)
+      @_timing_enabled = enabled
+    end
+
+    def _timing_enabled?
+      # Use instance_variable_defined? (not defined?) to handle false correctly
+      return @_timing_enabled if instance_variable_defined?(:@_timing_enabled)
+      superclass.respond_to?(:_timing_enabled?) ? superclass._timing_enabled? : true
+    end
+
+    def _timing_threshold_ms
+      @_timing_threshold_ms ||
+        (superclass.respond_to?(:_timing_threshold_ms) ? superclass._timing_threshold_ms : 500)
+    end
+  end
+
+  module RunWrapper
+    def _easyop_run(ctx, raise_on_failure:)
+      return super unless self.class._timing_enabled?
+
+      start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      super.tap do
+        ms = (Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000
+        if ms > self.class._timing_threshold_ms
+          logger = defined?(Rails) ? Rails.logger : Logger.new($stdout)
+          logger.warn "[SLOW] #{self.class.name} took #{ms.round(1)}ms"
+        end
+      end
+    end
+  end
+end
+
+# Activate:
+class ApplicationOperation
+  include Easyop::Operation
+  plugin TimingPlugin, threshold_ms: 200
+end
+
+# Opt out on a specific class:
+class Cache::Lookup &lt; ApplicationOperation
+  timing false
+end</code></pre>
+
+      <h3>Plugin building conventions</h3>
+      <ul>
+        <li>Prefix all internal instance/class methods with <code>_pluginname_</code> (e.g. <code>_timing_enabled?</code>) to avoid collisions</li>
+        <li>Use <code>instance_variable_defined?</code> (not <code>defined?</code>) when checking instance variables on class objects — correctly handles <code>false</code> values</li>
+        <li>Always call <code>super</code> in <code>RunWrapper#_easyop_run</code> and return ctx</li>
+        <li>Implement per-class opt-out using the <code>instance_variable_defined?</code> pattern</li>
+        <li>Walk the inheritance chain (<code>superclass.respond_to?</code>) to inherit configuration</li>
+      </ul>
+
+      <h2 id="easyop-plugins-base">Easyop::Plugins::Base</h2>
+      <p>Abstract base class. Inherit from it to document intent — it raises <code>NotImplementedError</code> if <code>.install</code> is not overridden.</p>
+
+      <pre><code class="language-ruby">class MyPlugin &lt; Easyop::Plugins::Base
+  def self.install(base, **options)
+    # your implementation
+  end
+end</code></pre>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

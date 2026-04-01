@@ -1,0 +1,18 @@
+<% content_for :title, "Subscribe to Newsletter" %>
+
+<h1>Subscribe to Our Newsletter</h1>
+<p>Get notified when new articles are published.</p>
+
+<%= form_with url: subscriptions_path, scope: :subscription do |f| %>
+  <label>Name (optional)
+    <%= f.text_field :name, placeholder: "Your name" %>
+  </label>
+
+  <label>Email
+    <%= f.email_field :email, placeholder: "you@example.com" %>
+  </label>
+
+  <br>
+  <%= f.submit "Subscribe", class: "btn" %>
+  <%= link_to "Maybe later", root_path, class: "btn" %>
+<% end %>

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flows — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html" class="active">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Flows</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Flows</h1>
+      <p><code>Easyop::Flow</code> runs a sequence of operations sharing one <code>ctx</code>. Failure in any step halts the chain and triggers rollback of completed steps in reverse order.</p>
+
+      <h2 id="basic-flow">Basic Flow</h2>
+
+      <pre><code class="language-ruby">class ProcessCheckout
+  include Easyop::Flow
+
+  flow ValidateCart,
+       ApplyCoupon,
+       ChargePayment,
+       CreateOrder,
+       SendConfirmation
+end
+
+result = ProcessCheckout.call(user: current_user, cart: current_cart)
+result.success?  # => true
+result.order     # => #&lt;Order id=42&gt;</code></pre>
+
+      <h2 id="how-execution-works">How Execution Works</h2>
+      <p>For each step in the flow, EasyOp:</p>
+      <ol>
+        <li>Checks <code>skip?</code> — if <code>skip_if</code> is declared and truthy, the step is skipped entirely (not added to the rollback list)</li>
+        <li>Checks inline lambda guards (if a <code>-&gt;(ctx){}</code> precedes the step)</li>
+        <li>Creates an instance of the step class</li>
+        <li>Calls <code>instance._easyop_run(ctx, raise_on_failure: true)</code> — the step runs with full hook and rescue support</li>
+        <li>On success: calls <code>ctx.called!(instance)</code> to register for rollback</li>
+        <li>On failure (<code>Ctx::Failure</code> raised): stops the chain, calls <code>ctx.rollback!</code></li>
+      </ol>
+
+      <pre><code class="language-ruby"># Simplified execution model:
+#
+# ProcessOrder.call(attrs)
+#   └─ new._easyop_run(ctx, raise_on_failure: false)
+#         └─ _run_safe
+#               └─ prepare { call }  ← Flow::call
+#                     ├─ step1: skip? → instantiate → _easyop_run → called!
+#                     ├─ step2: skip? → instantiate → _easyop_run → called!
+#                     ├─ step3: fails → raises Ctx::Failure
+#                     └─ rescue: ctx.rollback! → step2.rollback, step1.rollback</code></pre>
+
+      <h2 id="rollback">Rollback</h2>
+      <p>Each step can define a <code>rollback</code> method. On failure, completed steps are rolled back in reverse order. Errors inside individual rollbacks are swallowed so all rollbacks run.</p>
+
+      <pre><code class="language-ruby">class ChargePayment
+  include Easyop::Operation
+
+  def call
+    ctx.charge = Stripe::Charge.create(amount: ctx.total, source: ctx.token)
+  end
+
+  def rollback
+    # Called automatically if a later step in the flow fails
+    Stripe::Refund.create(charge: ctx.charge.id) if ctx.charge
+  end
+end
+
+class CreateOrder
+  include Easyop::Operation
+
+  def call
+    ctx.order = Order.create!(
+      user:  ctx.user,
+      total: ctx.total,
+      charge_id: ctx.charge.id
+    )
+  end
+
+  def rollback
+    ctx.order.destroy! if ctx.order&.persisted?
+  end
+end</code></pre>
+
+      <div class="callout callout-note">
+        <strong>Rollback rules</strong>
+        Only steps that completed successfully (i.e., their <code>call</code> returned without failing) are rolled back. The step that fails is NOT rolled back — only the ones that ran before it.
+      </div>
+
+      <h2 id="skip-if">skip_if — Optional Steps</h2>
+      <p>Declare on the operation class when it should be bypassed inside a flow:</p>
+
+      <pre><code class="language-ruby">class ApplyCoupon
+  include Easyop::Operation
+
+  skip_if { |ctx| !ctx.coupon_code? || ctx.coupon_code.to_s.empty? }
+
+  def call
+    coupon = Coupon.find_by(code: ctx.coupon_code)
+    ctx.fail!(error: "Invalid coupon") unless coupon&.active?
+    ctx.total    -= coupon.discount_amount
+    ctx.discount  = coupon.discount_amount
+  end
+end
+
+class ProcessCheckout
+  include Easyop::Flow
+  flow ValidateCart, ApplyCoupon, ChargePayment, CreateOrder
+end
+
+# ApplyCoupon is automatically skipped when coupon_code is absent or blank:
+ProcessCheckout.call(user: user, cart: cart)
+ProcessCheckout.call(user: user, cart: cart, coupon_code: "")
+# Both skip ApplyCoupon entirely — it's never instantiated, never added to rollback list
+
+# With a coupon:
+ProcessCheckout.call(user: user, cart: cart, coupon_code: "SAVE10")
+# ApplyCoupon runs normally</code></pre>
+
+      <div class="callout callout-warning">
+        <strong>skip_if is a Flow concern</strong>
+        <code>skip_if</code> is evaluated by the Flow runner before instantiating the step. Calling an operation directly — <code>ApplyCoupon.call(...)</code> — bypasses the skip check entirely. The step will always run when called directly.
+      </div>
+
+      <h2 id="lambda-guards">Lambda Guards (Inline)</h2>
+      <p>Place a lambda immediately before a step in the flow list to gate it. The lambda receives <code>ctx</code> and should return truthy to proceed, falsey to skip:</p>
+
+      <pre><code class="language-ruby">class ProcessCheckout
+  include Easyop::Flow
+
+  flow ValidateCart,
+       ->(ctx) { ctx.coupon_code? && !ctx.coupon_code.to_s.empty? }, ApplyCoupon,
+       ->(ctx) { ctx.gift_card? }, ApplyGiftCard,
+       ChargePayment,
+       CreateOrder
+end</code></pre>
+
+      <p><strong>Choosing between <code>skip_if</code> and lambda guard:</strong></p>
+      <ul>
+        <li>Use <code>skip_if</code> on the operation class when the condition is intrinsic to that operation (e.g., "skip when no coupon")</li>
+        <li>Use a lambda guard in the flow when the condition depends on flow context or orchestration concerns</li>
+      </ul>
+
+      <h2 id="nested-flows">Nested Flows</h2>
+      <p>A Flow can be a step inside another Flow. The inner flow shares the same ctx and participates in rollback normally.</p>
+
+      <pre><code class="language-ruby">class AuthAndValidate
+  include Easyop::Flow
+  flow AuthenticateUser, ValidatePermissions
+end
+
+class BillingFlow
+  include Easyop::Flow
+  flow ChargePayment, CreateInvoice
+end
+
+class FullCheckout
+  include Easyop::Flow
+  flow AuthAndValidate,   # nested flow — runs AuthenticateUser, ValidatePermissions
+       ValidateCart,
+       ApplyCoupon,
+       BillingFlow,       # nested flow — runs ChargePayment, CreateInvoice
+       SendConfirmation
+end</code></pre>
+
+      <h2 id="with-hooks">prepare / FlowBuilder</h2>
+      <p><code>FlowClass.prepare</code> returns a <code>FlowBuilder</code> that lets you attach callbacks before executing the flow. This is the canonical entry point for controller integration.</p>
+
+      <h3>Block callbacks</h3>
+      <pre><code class="language-ruby">ProcessCheckout.prepare
+  .on_success { |ctx| redirect_to order_path(ctx.order) }
+  .on_failure { |ctx| flash[:error] = ctx.error; redirect_back }
+  .call(user: current_user, cart: current_cart, coupon_code: params[:coupon])</code></pre>
+
+      <h3>Symbol callbacks with bind_with</h3>
+      <pre><code class="language-ruby"># Bind a host object (e.g. a Rails controller) to dispatch to named methods:
+def create
+  ProcessCheckout.prepare
+    .bind_with(self)
+    .on(success: :order_created, fail: :checkout_failed)
+    .call(user: current_user, cart: current_cart, coupon_code: params[:coupon])
+end
+
+private
+
+def order_created(ctx)
+  redirect_to order_path(ctx.order), notice: "Order placed!"
+end
+
+def checkout_failed(ctx)
+  flash[:error] = ctx.error
+  render :new
+end</code></pre>
+
+      <h3>Zero-arity methods</h3>
+      <p>If the bound method accepts no arguments, ctx is not passed:</p>
+      <pre><code class="language-ruby">def order_created    # no ctx argument
+  redirect_to orders_path
+end</code></pre>
+
+      <h3>Multiple callbacks</h3>
+      <pre><code class="language-ruby">ProcessCheckout.prepare
+  .on_success { |ctx| Analytics.track("checkout", order_id: ctx.order.id) }
+  .on_success { |ctx| redirect_to order_path(ctx.order) }
+  .on_failure { |ctx| Rails.logger.error "Checkout failed: #{ctx.error}" }
+  .on_failure { |ctx| render json: { error: ctx.error }, status: 422 }
+  .call(attrs)</code></pre>
+
+      <h2 id="call-vs-call-bang">.call vs .call! on Flows</h2>
+      <p>Flows support the same two entry points as single operations:</p>
+
+      <pre><code class="language-ruby"># .call — returns ctx, never raises on ctx.fail!
+result = ProcessCheckout.call(attrs)
+result.success?  # check result
+
+# .call! — raises Easyop::Ctx::Failure on failure
+begin
+  result = ProcessCheckout.call!(attrs)
+rescue Easyop::Ctx::Failure => e
+  e.ctx.error  # => the error message from whichever step failed
+end</code></pre>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

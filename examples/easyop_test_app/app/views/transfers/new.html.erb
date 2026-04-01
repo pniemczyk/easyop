@@ -1,0 +1,25 @@
+<% content_for :title, "Transfer Credits" %>
+
+<h1>Transfer Credits</h1>
+
+<p>Your current balance: <strong><%= current_user.credits %> credit<%= "s" unless current_user.credits == 1 %></strong></p>
+
+<%= form_with url: transfers_path, method: :post do |f| %>
+  <label>Recipient
+    <%= f.select :recipient_id, @users.map { |u| ["#{u.name} (#{u.credits} credits)", u.id] },
+                 { include_blank: "— select a recipient —" } %>
+  </label>
+
+  <label>Amount (credits)
+    <%= f.number_field :amount, min: 1, value: 1 %>
+  </label>
+
+  <label style="display: flex; align-items: center; gap: 0.5rem; margin-top: 1rem;">
+    <%= f.check_box :apply_fee, {}, "1", "0" %>
+    <span>Apply 2% processing fee (deducted from transfer amount)</span>
+  </label>
+
+  <br>
+  <%= f.submit "Transfer Credits", class: "btn" %>
+  <%= link_to "Cancel", root_path, class: "btn" %>
+<% end %>

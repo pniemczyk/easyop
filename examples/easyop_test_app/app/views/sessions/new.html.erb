@@ -1,0 +1,21 @@
+<% content_for :title, "Log In" %>
+
+<h1>Log In</h1>
+
+<% if flash.now[:alert] %>
+  <div class="alert"><%= flash.now[:alert] %></div>
+<% end %>
+
+<%= form_with url: session_path, scope: :session do |f| %>
+  <label>Email
+    <%= f.email_field :email, placeholder: "you@example.com" %>
+  </label>
+
+  <label>Password
+    <%= f.password_field :password, placeholder: "Your password" %>
+  </label>
+
+  <br>
+  <%= f.submit "Log In", class: "btn" %>
+  <%= link_to "Register instead", new_registration_path, class: "btn" %>
+<% end %>

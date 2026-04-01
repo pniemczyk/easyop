@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title><%= content_for(:title) || "EasyOp Blog" %></title>
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <%= csrf_meta_tags %>
+    <%= csp_meta_tag %>
+    <%= stylesheet_link_tag :app %>
+    <style>
+      body { font-family: sans-serif; max-width: 900px; margin: 0 auto; padding: 1rem; }
+      nav { background: #333; color: white; padding: 0.75rem 1rem; margin-bottom: 1.5rem; display: flex; gap: 1rem; align-items: center; }
+      nav a { color: #ccc; text-decoration: none; }
+      nav a:hover { color: white; }
+      nav .brand { color: white; font-weight: bold; font-size: 1.1rem; margin-right: auto; }
+      .alert { background: #fee; border: 1px solid #f88; padding: 0.5rem 1rem; margin-bottom: 1rem; border-radius: 4px; }
+      .notice { background: #efe; border: 1px solid #8c8; padding: 0.5rem 1rem; margin-bottom: 1rem; border-radius: 4px; }
+      .errors { background: #fee; border: 1px solid #f88; padding: 0.5rem 1rem; margin-bottom: 1rem; border-radius: 4px; }
+      form label { display: block; margin-top: 0.75rem; font-weight: bold; }
+      form input[type=text], form input[type=email], form input[type=password], form textarea { width: 100%; padding: 0.4rem; box-sizing: border-box; }
+      form textarea { height: 200px; }
+      form button, .btn { background: #333; color: white; border: none; padding: 0.5rem 1rem; cursor: pointer; border-radius: 4px; text-decoration: none; display: inline-block; margin-top: 0.5rem; }
+      form button:hover, .btn:hover { background: #555; }
+      .btn-danger { background: #c00; }
+      .btn-danger:hover { background: #e00; }
+      article.post { border-bottom: 1px solid #ddd; padding-bottom: 1rem; margin-bottom: 1rem; }
+      .badge { font-size: 0.75rem; padding: 2px 6px; border-radius: 3px; }
+      .badge-draft { background: #fc0; color: #333; }
+      .badge-published { background: #6c6; color: white; }
+    </style>
+  </head>
+
+  <body>
+    <nav>
+      <span class="brand"><%= link_to "EasyOp Blog", root_path %></span>
+      <%= link_to "Articles", articles_path %>
+      <%= link_to "Subscribe", new_subscription_path %>
+      <% if logged_in? %>
+        <%= link_to "Op Logs", operation_logs_path %>
+      <% end %>
+      <% if logged_in? %>
+        <%= link_to "Transfer Credits", new_transfer_path %>
+        <%= link_to "New Article", new_article_path %>
+        <%= button_to "Logout (#{current_user.name})", session_path, method: :delete, form: { style: "display:inline" } %>
+      <% else %>
+        <%= link_to "Login", new_session_path %>
+        <%= link_to "Register", new_registration_path %>
+      <% end %>
+    </nav>
+
+    <% if flash[:notice] %>
+      <div class="notice"><%= flash[:notice] %></div>
+    <% end %>
+    <% if flash[:alert] %>
+      <div class="alert"><%= flash[:alert] %></div>
+    <% end %>
+
+    <%= yield %>
+  </body>
+</html>

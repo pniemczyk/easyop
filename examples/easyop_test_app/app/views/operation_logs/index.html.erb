@@ -1,0 +1,37 @@
+<% content_for :title, "Operation Logs" %>
+
+<h1>Operation Logs</h1>
+<p><small>Showing the most recent 100 operation executions recorded by the EasyOp Recording plugin.</small></p>
+
+<% if @logs.empty? %>
+  <p>No operation logs yet.</p>
+<% else %>
+  <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+    <thead>
+      <tr style="background: #f5f5f5; text-align: left;">
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Operation</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Status</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Duration</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Error</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Performed At</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @logs.each do |log| %>
+        <tr style="border-bottom: 1px solid #eee;">
+          <td style="padding: 0.5rem; font-family: monospace;"><%= log.operation_name %></td>
+          <td style="padding: 0.5rem;">
+            <% if log.success? %>
+              <span class="badge badge-published">ok</span>
+            <% else %>
+              <span class="badge badge-draft">FAILED</span>
+            <% end %>
+          </td>
+          <td style="padding: 0.5rem;"><%= log.duration_ms ? "#{log.duration_ms.round(1)}ms" : "—" %></td>
+          <td style="padding: 0.5rem; color: #c00;"><%= log.error_message.presence || "—" %></td>
+          <td style="padding: 0.5rem;"><%= log.performed_at.strftime("%Y-%m-%d %H:%M:%S") %></td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>

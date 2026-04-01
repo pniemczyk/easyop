@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Tools — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html" class="active">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">&rsaquo;</span>
+  <span class="topbar-current">AI Tools</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1 id="ai-tools">AI Tools — Claude Skill &amp; LLM Context</h1>
+      <p>EasyOp ships with two sets of AI helpers: a <strong>Claude Code skill</strong> that teaches Claude how to write operations in your project, and <strong>LLM context files</strong> that any AI assistant can load to understand the gem's internals.</p>
+
+      <div class="callout callout-tip">
+        <strong>TL;DR</strong>
+        Copy the <code>claude-plugin/</code> folder into your project (or point your AI assistant at <code>llms/overview.md</code>) and Claude will write correct, idiomatic EasyOp code without needing to re-explain the API every session.
+      </div>
+
+      <h2 id="claude-skill">Claude Code Skill</h2>
+      <p>The skill lives in <code>claude-plugin/skills/easyop/</code>. It is a structured prompt bundle that Claude Code auto-activates whenever you mention operations, flows, or the <code>easyop</code> gem.</p>
+
+      <h3 id="skill-structure">Skill structure</h3>
+      <pre><code class="language-text">claude-plugin/
+├── .claude-plugin/
+│   └── plugin.json          # Plugin metadata &amp; activation triggers
+└── skills/
+    └── easyop/
+        ├── SKILL.md         # Core skill — loaded automatically when relevant
+        ├── references/
+        │   ├── ctx.md           # Ctx API reference
+        │   ├── operations.md    # Operation DSL (hooks, rescue, schema)
+        │   ├── flow.md          # Flow + FlowBuilder reference
+        │   └── hooks-and-rescue.md
+        └── examples/
+            ├── basic_operation.rb
+            ├── flow.rb
+            ├── rails_controller.rb
+            └── testing.rb</code></pre>
+
+      <h3 id="installing-skill">Installing the skill</h3>
+      <p>There are two ways to install the skill into a project.</p>
+
+      <p><strong>Option A — Copy to your project</strong> (recommended, works with any Claude Code version):</p>
+      <pre><code class="language-bash"># From your project root
+cp -r path/to/easyop/claude-plugin/.claude-plugin .
+cp -r path/to/easyop/claude-plugin/skills .</code></pre>
+
+      <p>Then commit both <code>.claude-plugin/</code> and <code>skills/</code> to your repo. Every developer on the team gets the skill automatically.</p>
+
+      <p><strong>Option B — Reference from <code>CLAUDE.md</code></strong> (if your project already has a <code>CLAUDE.md</code>):</p>
+      <pre><code class="language-markdown">## EasyOp
+@path/to/easyop/claude-plugin/skills/easyop/SKILL.md</code></pre>
+
+      <h3 id="what-the-skill-does">What the skill does</h3>
+      <p>Once installed, Claude will:</p>
+      <ul>
+        <li>Generate correct <code>include Easyop::Operation</code> boilerplate with <code>call</code>, typed <code>params</code>, and <code>rescue_from</code></li>
+        <li>Compose operations into flows with <code>include Easyop::Flow</code> and the <code>flow</code> DSL</li>
+        <li>Add <code>rollback</code> methods to flow steps when you describe multi-step DB operations</li>
+        <li>Use <code>skip_if</code> for optional steps and lambda guards for inline conditions</li>
+        <li>Choose the right plugin (<code>Recording</code>, <code>Async</code>, <code>Transactional</code>) based on your intent</li>
+        <li>Write RSpec specs that call operations directly without HTTP or controller overhead</li>
+      </ul>
+
+      <h3 id="activation-triggers">Activation triggers</h3>
+      <p>The skill activates automatically when you say things like:</p>
+      <ul>
+        <li>"create an operation for …"</li>
+        <li>"compose these into a flow"</li>
+        <li>"add rollback to this flow step"</li>
+        <li>"run this operation in the background"</li>
+        <li>"wrap this in a transaction"</li>
+        <li>"replace this service object with an operation"</li>
+        <li>"how is easyop different from interactor"</li>
+      </ul>
+
+      <h2 id="llm-context-files">LLM Context Files</h2>
+      <p>The <code>llms/</code> folder contains two Markdown files optimised for pasting into any AI chat (ChatGPT, Gemini, Cursor, etc.) to give the model a full picture of the gem before asking it to write or review code.</p>
+
+      <pre><code class="language-text">llms/
+├── overview.md   # File map, module responsibilities, key design decisions
+└── usage.md      # Common patterns and recipes</code></pre>
+
+      <h3 id="overview-md">overview.md</h3>
+      <p>Load this before asking an AI to <em>modify or extend</em> the gem itself. It covers:</p>
+      <ul>
+        <li>The full file map with one-line descriptions of each module</li>
+        <li>How <code>Ctx</code>, <code>Hooks</code>, <code>Rescuable</code>, <code>Schema</code>, <code>Flow</code>, and all four plugins relate to each other</li>
+        <li>Plugin architecture: how <code>Plugins::Base</code> works, the <code>plugin</code> DSL, prepend-based wrapping</li>
+      </ul>
+
+      <h3 id="usage-md">usage.md</h3>
+      <p>Load this before asking an AI to <em>write application code</em> using the gem. It covers:</p>
+      <ul>
+        <li>Basic operation, chainable callbacks, bang variant</li>
+        <li>Hooks, <code>rescue_from</code>, typed schemas</li>
+        <li>Flows: rollback, <code>skip_if</code>, lambda guards, nested flows</li>
+        <li>All four plugins with configuration examples</li>
+        <li>Rails controller integration patterns</li>
+        <li>RSpec patterns for unit and integration testing</li>
+      </ul>
+
+      <h3 id="how-to-use-llm-files">How to use the LLM files</h3>
+
+      <p><strong>In Claude.ai / ChatGPT / Gemini</strong> — paste the file content as a system message or first user message before your question:</p>
+      <pre><code class="language-text">&lt;context&gt;
+[paste contents of llms/usage.md here]
+&lt;/context&gt;
+
+Now write an operation that validates a payment and records it...</code></pre>
+
+      <p><strong>In Cursor / Windsurf / Copilot Chat</strong> — open <code>llms/usage.md</code> and use "Add to context" (or the equivalent @-mention), then ask your question in the chat panel.</p>
+
+      <p><strong>Programmatically</strong> — when building an AI pipeline or agent, inject the file content as a system prompt:</p>
+      <pre><code class="language-ruby">require "anthropic"
+
+client = Anthropic::Client.new
+llm_context = File.read("path/to/easyop/llms/usage.md")
+
+response = client.messages(
+  model: "claude-opus-4-6",
+  max_tokens: 2048,
+  system: llm_context,
+  messages: [{ role: "user", content: "Write an operation that processes a refund..." }]
+)</code></pre>
+
+      <h2 id="example-prompts">Example prompts</h2>
+      <p>Once the skill or LLM context is loaded, these prompts produce idiomatic EasyOp code:</p>
+
+      <table>
+        <thead><tr><th>Prompt</th><th>What Claude generates</th></tr></thead>
+        <tbody>
+          <tr><td>"Create an operation that registers a new user with email validation"</td><td>Operation with <code>params</code> schema, <code>rescue_from ActiveRecord::RecordInvalid</code>, and <code>before</code> hook for normalisation</td></tr>
+          <tr><td>"Turn this checkout logic into a flow with rollback"</td><td><code>include Easyop::Flow</code> with inner-class steps, each with a <code>rollback</code> method</td></tr>
+          <tr><td>"Make this operation run in the background"</td><td>Adds <code>plugin Easyop::Plugins::Async</code> to the base class and shows <code>.call_async</code> usage</td></tr>
+          <tr><td>"I need an audit trail for all operations"</td><td>Adds <code>plugin Easyop::Plugins::Recording</code>, migration for <code>operation_logs</code>, and <code>recording false</code> opt-out where needed</td></tr>
+          <tr><td>"Write an RSpec suite for this flow"</td><td>Unit specs for each step in isolation plus an integration spec that runs the full flow</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="custom-plugin-with-ai">Building a custom plugin with AI assistance</h2>
+      <p>The plugin architecture is documented in <a href="plugins.html#building-your-own">Plugins → Building Your Own</a>. When asking Claude to scaffold a new plugin, include this context snippet in your prompt:</p>
+
+      <pre><code class="language-ruby"># Every plugin must:
+# 1. Inherit from Easyop::Plugins::Base
+# 2. Implement self.install(operation_class, **options)
+# 3. Use prepend on a Module to wrap _easyop_run (or around hooks for lighter wrapping)
+
+class Easyop::Plugins::MyPlugin &lt; Easyop::Plugins::Base
+  def self.install(op, **opts)
+    op.prepend(Wrapper)
+    op.extend(ClassMethods)
+    op.instance_variable_set(:@my_option, opts[:my_option])
+  end
+
+  module Wrapper
+    def _easyop_run
+      # before-call work
+      super
+      # after-call work
+    end
+  end
+
+  module ClassMethods
+    def my_option
+      @my_option
+    end
+  end
+end</code></pre>
+
+      <h2 id="keeping-context-fresh">Keeping context fresh</h2>
+      <p>The <code>llms/</code> and <code>claude-plugin/</code> files are maintained alongside the gem source. When you upgrade easyop:</p>
+      <ol>
+        <li>Re-copy <code>claude-plugin/</code> into your project to pick up new skill references</li>
+        <li>Re-paste <code>llms/usage.md</code> if you use it in an AI pipeline</li>
+        <li>Check the <a href="https://github.com/pniemczyk/easyop/blob/main/README.md">CHANGELOG</a> for new DSL features that the AI should know about</li>
+      </ol>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

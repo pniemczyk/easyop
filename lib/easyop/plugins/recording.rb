@@ -1,0 +1,115 @@
+# frozen_string_literal: true
+
+module Easyop
+  module Plugins
+    # Records operation executions to a database model.
+    #
+    # Usage:
+    #   class ApplicationOperation
+    #     include Easyop::Operation
+    #     plugin Easyop::Plugins::Recording, model: OperationLog
+    #   end
+    #
+    # Required model columns (create with the generator migration):
+    #   operation_name  :string,   null: false
+    #   success         :boolean,  null: false
+    #   error_message   :string
+    #   params_data     :text               # stored as JSON
+    #   duration_ms     :float
+    #   performed_at    :datetime, null: false
+    #
+    # Opt out per operation class:
+    #   class MyOp < ApplicationOperation
+    #     recording false
+    #   end
+    #
+    # Options:
+    #   model:         (required) ActiveRecord class
+    #   record_params: true       pass false to skip params serialization
+    module Recording
+      # Sensitive keys scrubbed from params_data before persisting.
+      SCRUBBED_KEYS = %i[password password_confirmation token secret api_key].freeze
+
+      def self.install(base, model:, record_params: true, **_options)
+        base.extend(ClassMethods)
+        base.prepend(RunWrapper)
+        base.instance_variable_set(:@_recording_model,        model)
+        base.instance_variable_set(:@_recording_record_params, record_params)
+      end
+
+      module ClassMethods
+        # Disable recording for this class: `recording false`
+        def recording(enabled)
+          @_recording_enabled = enabled
+        end
+
+        def _recording_enabled?
+          return @_recording_enabled if instance_variable_defined?(:@_recording_enabled)
+          superclass.respond_to?(:_recording_enabled?) ? superclass._recording_enabled? : true
+        end
+
+        def _recording_model
+          @_recording_model ||
+            (superclass.respond_to?(:_recording_model) ? superclass._recording_model : nil)
+        end
+
+        def _recording_record_params?
+          if instance_variable_defined?(:@_recording_record_params)
+            @_recording_record_params
+          elsif superclass.respond_to?(:_recording_record_params?)
+            superclass._recording_record_params?
+          else
+            true
+          end
+        end
+      end
+
+      module RunWrapper
+        def _easyop_run(ctx, raise_on_failure:)
+          return super unless self.class._recording_enabled?
+          return super unless (model = self.class._recording_model)
+          return super unless self.class.name # skip anonymous classes
+
+          start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          super.tap do
+            ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round(2)
+            _recording_persist!(ctx, model, ms)
+          end
+        end
+
+        private
+
+        def _recording_persist!(ctx, model, duration_ms)
+          attrs = {
+            operation_name: self.class.name,
+            success:        ctx.success?,
+            error_message:  ctx.error,
+            performed_at:   Time.current,
+            duration_ms:    duration_ms
+          }
+          attrs[:params_data] = _recording_safe_params(ctx) if self.class._recording_record_params?
+
+          # Only write columns the model actually has
+          safe = attrs.select { |k, _| model.column_names.include?(k.to_s) }
+          model.create!(safe)
+        rescue => e
+          _recording_warn(e)
+        end
+
+        def _recording_safe_params(ctx)
+          ctx.to_h
+             .except(*SCRUBBED_KEYS)
+             .transform_values { |v| v.is_a?(ActiveRecord::Base) ? { id: v.id, class: v.class.name } : v }
+             .to_json
+        rescue
+          nil
+        end
+
+        def _recording_warn(err)
+          return unless defined?(Rails) && Rails.respond_to?(:logger)
+          Rails.logger.warn "[EasyOp::Recording] Failed to record #{self.class.name}: #{err.message}"
+        end
+      end
+    end
+  end
+end

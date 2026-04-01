@@ -1,0 +1,49 @@
+/inspiration
+
+# ── Gem build output ───────────────────────────────────────────────────────────
+*.gem
+
+# ── OS / editor noise ──────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Example Rails app — runtime artifacts (never commit these) ─────────────────
+# Secrets
+/examples/easyop_test_app/config/master.key
+/examples/easyop_test_app/config/credentials/*.key
+/examples/easyop_test_app/.env
+/examples/easyop_test_app/.env.*
+
+# Logs
+/examples/easyop_test_app/log/*
+!/examples/easyop_test_app/log/.keep
+
+# Databases
+/examples/easyop_test_app/db/*.sqlite3
+/examples/easyop_test_app/db/*.sqlite3-journal
+/examples/easyop_test_app/db/*.sqlite3-shm
+/examples/easyop_test_app/db/*.sqlite3-wal
+
+# Storage (uploaded files, Active Storage blobs)
+/examples/easyop_test_app/storage/*
+!/examples/easyop_test_app/storage/.keep
+
+# Tmp (pids, cache, sockets, restart signal)
+/examples/easyop_test_app/tmp/*
+!/examples/easyop_test_app/tmp/.keep
+
+# Bundled gems
+/examples/easyop_test_app/.bundle/
+/examples/easyop_test_app/vendor/bundle/
+
+# Node / asset pipeline
+/examples/easyop_test_app/node_modules/
+/examples/easyop_test_app/public/assets/
+/examples/easyop_test_app/public/packs/
+/examples/easyop_test_app/.yarn/
+
+# Minitest coverage
+/examples/easyop_test_app/coverage/

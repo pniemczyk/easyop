@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Operations — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html" class="active">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Operations</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Operations</h1>
+      <p>An operation is the fundamental unit of business logic in EasyOp. Include <code>Easyop::Operation</code> in any Ruby class and define a <code>call</code> method.</p>
+
+      <h2 id="minimal-operation">Minimal Operation</h2>
+
+      <pre><code class="language-ruby">class DoubleNumber
+  include Easyop::Operation
+
+  def call
+    ctx.fail!(error: "input must be a number") unless ctx.number.is_a?(Numeric)
+    ctx.result = ctx.number * 2
+  end
+end
+
+result = DoubleNumber.call(number: 21)
+result.success?  # => true
+result.result    # => 42</code></pre>
+
+      <p>Including <code>Easyop::Operation</code> adds these to your class automatically:</p>
+      <ul>
+        <li><strong>ClassMethods</strong>: <code>.call</code>, <code>.call!</code>, <code>.plugin</code>, <code>._registered_plugins</code></li>
+        <li><strong>Easyop::Hooks</strong>: <code>before</code>, <code>after</code>, <code>around</code></li>
+        <li><strong>Easyop::Rescuable</strong>: <code>rescue_from</code></li>
+        <li><strong>Easyop::Skip</strong>: <code>skip_if</code></li>
+        <li><strong>Easyop::Schema</strong>: <code>params</code> / <code>inputs</code>, <code>result</code> / <code>outputs</code></li>
+      </ul>
+
+      <h2 id="hooks">Hooks</h2>
+      <p>Lifecycle callbacks run around the <code>call</code> method.</p>
+
+      <h3>before / after</h3>
+      <pre><code class="language-ruby">class CreateUser
+  include Easyop::Operation
+
+  before :validate_inputs      # symbol — runs a named method
+  before { ctx.email = ctx.email.to_s.strip.downcase }  # block
+
+  after :notify_admin          # always runs — even after failure
+
+  def call
+    ctx.user = User.create!(ctx.slice(:email, :name))
+  end
+
+  private
+
+  def validate_inputs
+    ctx.fail!(error: "email is required") if ctx.email.to_s.empty?
+  end
+
+  def notify_admin
+    AdminMailer.new_user(ctx.user).deliver_later if ctx.success?
+  end
+end</code></pre>
+
+      <h3>around</h3>
+      <pre><code class="language-ruby">class TrackedOperation
+  include Easyop::Operation
+
+  around :with_timing        # method-style: use yield
+  around { |inner| Sentry.with_scope { inner.call } }  # block-style: call inner.call
+
+  def call
+    ctx.result = do_work
+  end
+
+  private
+
+  def with_timing
+    t = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    yield    # continues the chain
+    ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - t) * 1000).round(1)
+    Rails.logger.info "#{self.class.name} took #{ms}ms"
+  end
+end</code></pre>
+
+      <h3>Hook execution order</h3>
+      <pre><code class="language-ruby"># Given:
+class MyOp
+  include Easyop::Operation
+  before :b1
+  before :b2
+  after  :a1
+  around :o1
+  around :o2
+  def call; end
+end
+
+# Execution order:
+# o1 starts
+#   o2 starts
+#     b1
+#     b2
+#     call
+#     a1 (in ensure — always runs)
+#   o2 ends
+# o1 ends</code></pre>
+
+      <h3>Hook inheritance</h3>
+      <pre><code class="language-ruby">class ApplicationOperation
+  include Easyop::Operation
+  before :set_timestamps
+  private
+  def set_timestamps; ctx.started_at = Time.current; end
+end
+
+class CreateUser &lt; ApplicationOperation
+  before :validate_email   # runs AFTER parent's before hooks
+  def call; ctx.user = User.create!(email: ctx.email); end
+  private
+  def validate_email; ctx.fail!(error: "invalid email") unless ctx.email&.include?("@"); end
+end</code></pre>
+
+      <h2 id="rescue-from">rescue_from</h2>
+      <p>Handle exceptions without littering <code>call</code> with begin/rescue blocks. Handlers run inside the operation instance and have access to <code>ctx</code>.</p>
+
+      <pre><code class="language-ruby">class ParseJson
+  include Easyop::Operation
+
+  rescue_from JSON::ParserError do |e|
+    ctx.fail!(error: "Invalid JSON: #{e.message.lines.first.strip}")
+  end
+
+  def call
+    ctx.parsed = JSON.parse(ctx.raw)
+  end
+end</code></pre>
+
+      <h3>with: method reference</h3>
+      <pre><code class="language-ruby">class ImportData
+  include Easyop::Operation
+
+  rescue_from CSV::MalformedCSVError, with: :handle_bad_csv
+  rescue_from ActiveRecord::RecordInvalid do |e|
+    ctx.fail!(error: e.message, errors: e.record.errors.to_h)
+  end
+  rescue_from StandardError, with: :handle_unexpected
+
+  def call
+    # ...
+  end
+
+  private
+
+  def handle_bad_csv(e)
+    ctx.fail!(error: "CSV is malformed: #{e.message}")
+  end
+
+  def handle_unexpected(e)
+    Sentry.capture_exception(e)
+    ctx.fail!(error: "An unexpected error occurred")
+  end
+end</code></pre>
+
+      <h3>Handler priority</h3>
+      <ul>
+        <li>Handlers are checked in <strong>child-first, then parent</strong> order</li>
+        <li>Within a class, handlers are checked in <strong>definition order</strong> (first match wins)</li>
+        <li>A child class handler for the same exception class takes priority over the parent's</li>
+      </ul>
+
+      <pre><code class="language-ruby">class Base
+  include Easyop::Operation
+  rescue_from StandardError do |_e|
+    ctx.fail!(error: "base: standard error")
+  end
+end
+
+class Child &lt; Base
+  rescue_from RuntimeError do |e|
+    ctx.fail!(error: "child: #{e.message}")  # takes priority for RuntimeError
+  end
+  def call; raise RuntimeError, "boom"; end
+end
+
+Child.call.error  # => "child: boom"</code></pre>
+
+      <h2 id="typed-schema">Typed Schema</h2>
+      <p>Declare expected inputs and outputs. Validation runs as hooks — params before <code>call</code>, result after.</p>
+
+      <h3>params / inputs</h3>
+      <pre><code class="language-ruby">class RegisterUser
+  include Easyop::Operation
+
+  params do                           # validated before call
+    required :email,  String
+    required :age,    Integer
+    optional :plan,   String,   default: "free"
+    optional :admin,  :boolean, default: false
+    optional :note,   String                     # optional with no default
+  end
+
+  def call
+    ctx.user = User.create!(ctx.slice(:email, :age, :plan))
+  end
+end
+
+# Identical — inputs is an alias for params:
+class RegisterUser
+  inputs do
+    required :email, String
+  end
+end</code></pre>
+
+      <h3>result / outputs</h3>
+      <pre><code class="language-ruby">class RegisterUser
+  include Easyop::Operation
+
+  result do                           # validated after call (only on success)
+    required :user,  User
+    optional :token, String
+  end
+
+  def call
+    ctx.user = User.create!(ctx.slice(:email))
+  end
+end
+
+# outputs is an alias for result:
+outputs do
+  required :record, ActiveRecord::Base
+end</code></pre>
+
+      <h3>Type shorthands</h3>
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>Resolves to</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>:boolean</code></td><td><code>TrueClass | FalseClass</code></td></tr>
+          <tr><td><code>:string</code></td><td><code>String</code></td></tr>
+          <tr><td><code>:integer</code></td><td><code>Integer</code></td></tr>
+          <tr><td><code>:float</code></td><td><code>Float</code></td></tr>
+          <tr><td><code>:symbol</code></td><td><code>Symbol</code></td></tr>
+          <tr><td><code>:any</code></td><td>any value (no type check)</td></tr>
+        </tbody>
+      </table>
+      <p>Pass any Ruby class directly: <code>required :user, User</code> or <code>required :base, ActiveRecord::Base</code>.</p>
+
+      <h3>strict_types</h3>
+      <pre><code class="language-ruby">Easyop.configure { |c| c.strict_types = true }
+# true  → ctx.fail! on type mismatch
+# false → emit a warning to $stderr (default)
+
+op = Class.new do
+  include Easyop::Operation
+  params { required :age, Integer }
+  def call; end
+end
+
+op.call(age: "30").failure?  # => true (strict mode)
+op.call(age: "30").failure?  # => false, but warns (permissive mode)</code></pre>
+
+      <h2 id="inheritance">Inheritance</h2>
+      <p>Subclasses inherit all hooks, rescue handlers, and schema from parent classes.</p>
+
+      <pre><code class="language-ruby">class ApplicationOperation
+  include Easyop::Operation
+
+  rescue_from ActiveRecord::RecordNotFound do |e|
+    ctx.fail!(error: "#{e.model} not found")
+  end
+
+  rescue_from ActiveRecord::RecordInvalid do |e|
+    ctx.fail!(
+      error:  e.message,
+      errors: e.record.errors.to_h
+    )
+  end
+
+  rescue_from StandardError do |e|
+    Sentry.capture_exception(e)
+    ctx.fail!(error: "An unexpected error occurred")
+  end
+end
+
+class UpdateUser &lt; ApplicationOperation
+  def call
+    user = User.find(ctx.user_id)    # RecordNotFound handled by parent
+    user.update!(ctx.slice(:name, :email))  # RecordInvalid handled by parent
+    ctx.user = user
+  end
+end
+
+result = UpdateUser.call(user_id: 999)
+result.failure?  # => true
+result.error     # => "User not found"</code></pre>
+
+      <h2 id="plugin-dsl">Plugin DSL</h2>
+      <p>Activate plugins on an operation class. Subclasses inherit all installed plugins.</p>
+
+      <pre><code class="language-ruby">class ApplicationOperation
+  include Easyop::Operation
+
+  plugin Easyop::Plugins::Instrumentation
+  plugin Easyop::Plugins::Recording,    model: OperationLog
+  plugin Easyop::Plugins::Async,        queue: "operations"
+  plugin Easyop::Plugins::Transactional
+end
+
+# Child classes inherit all four plugins automatically:
+class CreateUser &lt; ApplicationOperation
+  def call
+    ctx.user = User.create!(email: ctx.email)
+  end
+end</code></pre>
+
+      <p>Each <code>plugin</code> call:</p>
+      <ol>
+        <li>Calls <code>PluginModule.install(self, **options)</code> — the plugin prepends/extends the class</li>
+        <li>Appends an entry to <code>_registered_plugins</code></li>
+      </ol>
+
+      <h2 id="registered-plugins">_registered_plugins</h2>
+      <p>Inspect which plugins are installed on a class:</p>
+
+      <pre><code class="language-ruby">ApplicationOperation._registered_plugins
+# => [
+#      { plugin: Easyop::Plugins::Instrumentation, options: {} },
+#      { plugin: Easyop::Plugins::Recording, options: { model: OperationLog } },
+#      { plugin: Easyop::Plugins::Async, options: { queue: "operations" } },
+#      { plugin: Easyop::Plugins::Transactional, options: {} }
+#    ]
+
+# Each subclass has its own list (only plugins registered on that class):
+class FastOp &lt; ApplicationOperation
+  plugin MyTimingPlugin
+end
+FastOp._registered_plugins
+# => [{ plugin: MyTimingPlugin, options: {} }]
+# (parent's plugins not listed — they are inherited via the MRO)</code></pre>
+
+      <h2 id="rollback">Rollback</h2>
+      <p>Define a <code>rollback</code> method to undo side effects when a flow fails. Rollback is called by <code>Easyop::Flow</code> — it has no effect when calling an operation directly.</p>
+
+      <pre><code class="language-ruby">class ChargePayment
+  include Easyop::Operation
+
+  def call
+    ctx.charge = Stripe::Charge.create(amount: ctx.total, source: ctx.token)
+  end
+
+  def rollback
+    Stripe::Refund.create(charge: ctx.charge.id) if ctx.charge
+  end
+end</code></pre>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

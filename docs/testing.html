@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Testing — EasyOp Docs</title>
+  <link rel="stylesheet" href="assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <a href="index.html" class="sidebar-logo">EasyOp</a>
+    <span class="sidebar-version">v0.1.0</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-group">
+      <div class="nav-group-label">Getting Started</div>
+      <a href="index.html">Overview</a>
+      <a href="getting-started.html">Getting Started</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Core</div>
+      <a href="ctx.html">Ctx API</a>
+      <a href="operations.html">Operations</a>
+      <a href="flows.html">Flows</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Plugins</div>
+      <a href="plugins.html">All Plugins</a>
+    </div>
+    <div class="nav-group">
+      <div class="nav-group-label">Guides</div>
+      <a href="testing.html" class="active">Testing</a>
+      <a href="rails.html">Rails Integration</a>
+      <a href="ai-tools.html">AI Tools</a>
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="https://github.com/pniemczyk/easyop" target="_blank">&#9654; GitHub</a>
+  </div>
+</aside>
+
+<div class="topbar">
+  <button class="hamburger" id="sidebarToggle" aria-label="Toggle navigation">&#9776;</button>
+  <a href="index.html" class="topbar-home">EasyOp Docs</a>
+  <span class="topbar-sep">›</span>
+  <span class="topbar-current">Testing Guide</span>
+</div>
+
+<div class="layout">
+  <main class="content">
+    <div class="content-card">
+
+      <h1>Testing Guide</h1>
+      <p>Operations are plain Ruby objects. Testing them is simple: call the operation, inspect the returned ctx. No HTTP requests, no controller overhead, no factory magic required.</p>
+
+      <h2 id="why-operations-are-easy-to-test">Why Operations Are Easy to Test</h2>
+      <ul>
+        <li>Pure input/output: pass attrs in, read attrs from ctx</li>
+        <li>Deterministic: no global state (use <code>Easyop.reset_config!</code> to clean up)</li>
+        <li>Composable: test each step independently, then the flow</li>
+        <li>No framework dependencies: works in plain RSpec without Rails</li>
+      </ul>
+
+      <h2 id="basic-pattern">Basic Pattern: Call and Check Ctx</h2>
+
+      <pre><code class="language-ruby">RSpec.describe DoubleNumber do
+  describe ".call" do
+    context "with a valid number" do
+      subject(:ctx) { described_class.call(number: 7) }
+
+      it { is_expected.to be_success }
+      it { expect(ctx.result).to eq(14) }
+      it { expect(ctx.ok?).to be true }
+    end
+
+    context "with invalid input" do
+      subject(:ctx) { described_class.call(number: "oops") }
+
+      it { is_expected.to be_failure }
+      it { expect(ctx.error).to eq("input must be a number") }
+      it { expect(ctx.failed?).to be true }
+    end
+  end
+end</code></pre>
+
+      <h2 id="testing-bang-variant">Testing .call!</h2>
+
+      <pre><code class="language-ruby">RSpec.describe DoubleNumber do
+  describe ".call!" do
+    it "raises Easyop::Ctx::Failure on failure" do
+      expect { described_class.call!(number: "bad") }
+        .to raise_error(Easyop::Ctx::Failure, /input must be a number/)
+    end
+
+    it "attaches the ctx to the exception" do
+      begin
+        described_class.call!(number: "bad")
+      rescue Easyop::Ctx::Failure => e
+        expect(e.ctx).to be_failure
+        expect(e.ctx.error).to eq("input must be a number")
+        expect(e.message).to eq("Operation failed: input must be a number")
+      end
+    end
+
+    it "returns ctx on success" do
+      ctx = described_class.call!(number: 5)
+      expect(ctx.result).to eq(10)
+    end
+  end
+end</code></pre>
+
+      <h2 id="testing-with-structured-errors">Testing with Structured Errors</h2>
+
+      <pre><code class="language-ruby">RSpec.describe ValidateOrder do
+  subject(:ctx) { described_class.call(quantity: -1, item: "", unit_price: 10) }
+
+  it { is_expected.to be_failure }
+  it { expect(ctx.errors[:quantity]).to eq("must be positive") }
+  it { expect(ctx.errors[:item]).to eq("is required") }
+  it { expect(ctx.error).to eq("Validation failed") }
+end</code></pre>
+
+      <h2 id="anonymous-operation-classes">Testing with Anonymous Operation Classes</h2>
+      <p>Define operations inline in your spec for complete isolation — no pollution of the global namespace:</p>
+
+      <pre><code class="language-ruby">RSpec.describe "before hooks" do
+  let(:log) { [] }
+
+  let(:op) do
+    l = log  # capture log in closure
+    Class.new do
+      include Easyop::Operation
+      before { l &lt;&lt; :before }
+      after  { l &lt;&lt; :after  }
+      define_method(:call) { l &lt;&lt; :call }
+    end
+  end
+
+  it "runs hooks in order" do
+    op.call
+    expect(log).to eq([:before, :call, :after])
+  end
+end
+
+RSpec.describe "rescue_from" do
+  let(:op) do
+    Class.new do
+      include Easyop::Operation
+      rescue_from ArgumentError do |e|
+        ctx.fail!(error: "rescued: #{e.message}")
+      end
+      def call; raise ArgumentError, "bad arg"; end
+    end
+  end
+
+  it "handles the exception" do
+    result = op.call
+    expect(result).to be_failure
+    expect(result.error).to eq("rescued: bad arg")
+  end
+end</code></pre>
+
+      <h2 id="testing-hooks">Testing Hooks</h2>
+
+      <pre><code class="language-ruby">RSpec.describe NormalizeEmail do
+  subject(:ctx) { described_class.call(email: "  ALICE@EXAMPLE.COM  ") }
+
+  it "strips and downcases via before hook" do
+    expect(ctx.normalized).to eq("alice@example.com")
+  end
+
+  it "after hook logs on success" do
+    expect { described_class.call(email: "Bob@Test.com") }
+      .to output(/normalized to: bob@test.com/).to_stdout
+  end
+
+  it "after hook does not log on failure" do
+    allow_any_instance_of(described_class).to receive(:call) do
+      ctx.fail!(error: "failed")
+    end
+    expect { described_class.call(email: "x") }
+      .not_to output.to_stdout
+  end
+end</code></pre>
+
+      <h2 id="testing-typed-schema">Testing with Typed Schema</h2>
+
+      <pre><code class="language-ruby">RSpec.describe RegisterUser do
+  context "with all required params" do
+    subject(:ctx) { described_class.call(email: "alice@example.com", age: 30) }
+
+    it { is_expected.to be_success }
+    it { expect(ctx.plan).to eq("free") }    # default applied
+    it { expect(ctx.admin).to eq(false) }    # default applied
+  end
+
+  context "missing required param" do
+    subject(:ctx) { described_class.call(email: "bob@example.com") }
+
+    it { is_expected.to be_failure }
+    it { expect(ctx.error).to match(/age/) }
+    it { expect(ctx.errors[:age]).to eq("is required") }
+  end
+
+  context "with strict_types and wrong type" do
+    before { Easyop.configure { |c| c.strict_types = true } }
+
+    subject(:ctx) { described_class.call(email: "alice@example.com", age: "thirty") }
+
+    it { is_expected.to be_failure }
+    it { expect(ctx.error).to match(/Type mismatch.*age/) }
+  end
+end</code></pre>
+
+      <h2 id="resetting-configuration">Resetting Configuration Between Tests</h2>
+      <p>Always reset <code>Easyop.config</code> between tests to prevent state leakage:</p>
+
+      <pre><code class="language-ruby"># spec/spec_helper.rb
+RSpec.configure do |config|
+  config.before(:each) do
+    Easyop.reset_config!
+  end
+end</code></pre>
+
+      <pre><code class="language-ruby"># Or reset in a specific describe block:
+RSpec.describe "strict_types" do
+  after { Easyop.reset_config! }
+
+  it "fails on type mismatch when strict_types is enabled" do
+    Easyop.configure { |c| c.strict_types = true }
+
+    op = Class.new do
+      include Easyop::Operation
+      params { required :age, Integer }
+      def call; end
+    end
+
+    result = op.call(age: "not a number")
+    expect(result).to be_failure
+    expect(result.error).to match(/Type mismatch/)
+  end
+end</code></pre>
+
+      <h2 id="testing-flows">Testing Flows</h2>
+
+      <pre><code class="language-ruby">RSpec.describe ProcessCheckout do
+  let(:user) { double("User") }
+  let(:cart) { double("Cart", items: [double(price: 100)]) }
+
+  context "when checkout succeeds" do
+    before do
+      allow(Stripe::Charge).to receive(:create).and_return(double(id: "ch_123"))
+      allow(Order).to receive(:create!).and_return(double(id: 42, persisted?: true))
+      allow(OrderMailer).to receive_message_chain(:confirmation, :deliver_later)
+    end
+
+    subject(:ctx) { described_class.call(user: user, cart: cart, payment_token: "tok_test") }
+
+    it { is_expected.to be_success }
+    it { expect(ctx.total).to eq(100) }
+  end
+
+  context "when the cart is empty" do
+    let(:cart) { double("Cart", items: []) }
+    subject(:ctx) { described_class.call(user: user, cart: cart, payment_token: "tok") }
+
+    it { is_expected.to be_failure }
+    it { expect(ctx.error).to eq("Cart is empty") }
+  end
+
+  context "when a step is skipped" do
+    before do
+      allow(Stripe::Charge).to receive(:create).and_return(double(id: "ch_ok"))
+      allow(Order).to receive(:create!).and_return(double(id: 99, persisted?: true))
+      allow(OrderMailer).to receive_message_chain(:confirmation, :deliver_later)
+    end
+
+    it "ApplyCoupon is skipped when coupon_code is absent" do
+      expect(Coupon).not_to receive(:find_by)
+      result = described_class.call(user: user, cart: cart, payment_token: "tok")
+      expect(result).to be_success
+    end
+  end
+end</code></pre>
+
+      <h2 id="testing-rollback">Testing Rollback</h2>
+
+      <pre><code class="language-ruby">RSpec.describe ProcessCheckout do
+  let(:user)   { double("User") }
+  let(:cart)   { double("Cart", items: [double(price: 50)]) }
+  let(:charge) { double("Charge", id: "ch_rollback") }
+
+  context "when CreateOrder fails after ChargePayment succeeded" do
+    before do
+      allow(Stripe::Charge).to receive(:create).and_return(charge)
+      allow(Order).to receive(:create!).and_raise(ActiveRecord::RecordInvalid.new(
+        double(errors: double(full_messages: ["invalid"]))
+      ))
+      allow(Stripe::Refund).to receive(:create)
+    end
+
+    subject(:ctx) { described_class.call(user: user, cart: cart, payment_token: "tok") }
+
+    it { is_expected.to be_failure }
+
+    it "rolls back the charge by issuing a refund" do
+      ctx
+      expect(Stripe::Refund).to have_received(:create).with(charge: "ch_rollback")
+    end
+  end
+end</code></pre>
+
+      <h2 id="testing-skip-if">Testing skip_if</h2>
+
+      <pre><code class="language-ruby">RSpec.describe ApplyCoupon do
+  describe ".skip?" do
+    it "skips when coupon_code is absent from ctx" do
+      ctx = Easyop::Ctx.new({})
+      expect(described_class.skip?(ctx)).to be true
+    end
+
+    it "skips when coupon_code is empty string" do
+      ctx = Easyop::Ctx.new(coupon_code: "")
+      expect(described_class.skip?(ctx)).to be true
+    end
+
+    it "does not skip when coupon_code is present" do
+      ctx = Easyop::Ctx.new(coupon_code: "SAVE10")
+      expect(described_class.skip?(ctx)).to be false
+    end
+  end
+end</code></pre>
+
+      <h2 id="testing-with-hooks">Testing with FlowBuilder (prepare)</h2>
+
+      <pre><code class="language-ruby">RSpec.describe ProcessCheckout do
+  let(:user) { double("User") }
+  let(:cart) { double("Cart", items: [double(price: 20)]) }
+
+  describe ".prepare" do
+    context "on success" do
+      before do
+        allow(Stripe::Charge).to receive(:create).and_return(double(id: "ch_ok"))
+        allow(Order).to receive(:create!).and_return(double(id: 1, persisted?: true))
+        allow(OrderMailer).to receive_message_chain(:confirmation, :deliver_later)
+      end
+
+      it "fires on_success callbacks" do
+        fired = nil
+        described_class.prepare
+          .on_success { |ctx| fired = ctx.order }
+          .call(user: user, cart: cart, payment_token: "tok")
+
+        expect(fired).not_to be_nil
+      end
+    end
+
+    context "with bind_with" do
+      let(:host) do
+        Class.new do
+          attr_reader :last_ctx
+          def order_placed(ctx) = (@last_ctx = ctx)
+          def checkout_failed(ctx) = (@last_ctx = ctx)
+        end.new
+      end
+
+      let(:empty_cart) { double("Cart", items: []) }
+
+      it "dispatches to the named method on the bound object" do
+        described_class.prepare
+          .bind_with(host)
+          .on(success: :order_placed, fail: :checkout_failed)
+          .call(user: user, cart: empty_cart, payment_token: "tok")
+
+        expect(host.last_ctx).to be_failure
+        expect(host.last_ctx.error).to eq("Cart is empty")
+      end
+    end
+  end
+end</code></pre>
+
+      <footer>
+        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+      </footer>
+    </div>
+  </main>
+  <aside class="toc-sidebar">
+    <div class="toc-inner">
+      <p class="toc-title">On this page</p>
+      <nav id="toc"></nav>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+  hljs.highlightAll();
+  document.querySelectorAll('pre code').forEach(block => {
+    const lang = block.className.replace('hljs language-', '').replace('language-', '').split(' ')[0];
+    if (lang) { const b = document.createElement('span'); b.className = 'lang-badge'; b.textContent = lang; block.parentElement.appendChild(b); }
+  });
+  const toc = document.getElementById('toc');
+  const headings = document.querySelectorAll('.content-card h2, .content-card h3');
+  headings.forEach(h => {
+    if (!h.id) h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    const a = document.createElement('a'); a.href = '#' + h.id; a.textContent = h.textContent;
+    a.className = h.tagName === 'H3' ? 'toc-h3' : 'toc-h2'; toc.appendChild(a);
+  });
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(e => { const l = toc.querySelector(`a[href="#${e.target.id}"]`); if (l) l.classList.toggle('active', e.isIntersecting); });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  headings.forEach(h => observer.observe(h));
+  document.querySelectorAll('pre code').forEach(block => {
+    const btn = document.createElement('button'); btn.className = 'copy-btn'; btn.title = 'Copy to clipboard'; btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>';
+    btn.onclick = () => { navigator.clipboard.writeText(block.textContent); btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polyline points=\"20 6 9 17 4 12\"></polyline></svg>'; btn.classList.add('copied'); setTimeout(() => { btn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"9\" y=\"9\" width=\"13\" height=\"13\" rx=\"2\" ry=\"2\"></rect><path d=\"M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1\"></path></svg>'; btn.classList.remove('copied'); }, 2000); };
+    block.parentElement.style.position = 'relative'; block.parentElement.appendChild(btn);
+  });
+  document.querySelectorAll('.content-card h2').forEach(h => {
+    const a = document.createElement('a'); a.className = 'anchor-icon'; a.href = '#' + h.id; a.innerHTML = '#'; h.appendChild(a);
+  });
+
+  // Mobile sidebar toggle
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebar = document.querySelector('.sidebar');
+  if (sidebarToggle && sidebar) {
+    sidebarToggle.addEventListener('click', () => sidebar.classList.toggle('open'));
+    document.addEventListener('click', e => {
+      if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+        sidebar.classList.remove('open');
+      }
+    });
+  }
+</script>
+</body>
+</html>

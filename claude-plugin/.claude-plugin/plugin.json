@@ -1,0 +1,7 @@
+{
+  "name": "easyop",
+  "version": "0.1.0",
+  "description": "Claude Code skill for the easyop gem — composable, testable operation objects for Ruby.",
+  "author": "Pawel Niemczyk",
+  "homepage": "https://github.com/pniemczyk/easyop"
+}
