@@ -1,0 +1,103 @@
+<% content_for :page_title, "Discount Codes" %>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+  <!-- List of codes -->
+  <div class="lg:col-span-2">
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-6 py-4 border-b border-gray-100">
+        <h2 class="text-base font-bold text-gray-900">All Discount Codes</h2>
+      </div>
+      <table class="w-full">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-100">
+            <th class="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Code</th>
+            <th class="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+            <th class="text-right px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Amount</th>
+            <th class="text-right px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Usage</th>
+            <th class="text-left px-6 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+            <th class="px-6 py-3"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          <% @discount_codes.each do |code| %>
+            <tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-6 py-4">
+                <span class="font-mono text-sm font-bold text-gray-900 bg-gray-100 px-2.5 py-1 rounded-lg"><%= code.code %></span>
+              </td>
+              <td class="px-6 py-4 text-sm text-gray-600 capitalize"><%= code.discount_type %></td>
+              <td class="px-6 py-4 text-sm font-semibold text-gray-900 text-right">
+                <% if code.discount_type == "percentage" %>
+                  <%= code.amount %>%
+                <% else %>
+                  $<%= "%.2f" % (code.amount / 100.0) %>
+                <% end %>
+              </td>
+              <td class="px-6 py-4 text-sm text-gray-600 text-right">
+                <%= code.use_count %><% if code.max_uses %>/<%= code.max_uses %><% end %>
+              </td>
+              <td class="px-6 py-4">
+                <% if code.valid_for_use? %>
+                  <span class="text-xs bg-green-50 text-green-700 font-semibold px-2.5 py-1 rounded-full">Active</span>
+                <% else %>
+                  <span class="text-xs bg-gray-100 text-gray-500 font-semibold px-2.5 py-1 rounded-full">Inactive</span>
+                <% end %>
+              </td>
+              <td class="px-6 py-4 text-right">
+                <%= button_to admin_discount_code_path(code), method: :delete,
+                    data: { turbo_confirm: "Delete this code?" },
+                    class: "text-xs text-red-500 hover:text-red-700 font-medium" do %>
+                  Delete
+                <% end %>
+              </td>
+            </tr>
+          <% end %>
+        </tbody>
+      </table>
+      <% if @discount_codes.empty? %>
+        <div class="py-12 text-center text-sm text-gray-400">No discount codes yet</div>
+      <% end %>
+    </div>
+  </div>
+
+  <!-- Create new code -->
+  <div>
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm p-6">
+      <h2 class="text-base font-bold text-gray-900 mb-5">Create New Code</h2>
+
+      <%= form_with url: admin_discount_codes_path, method: :post, class: "space-y-4" do |f| %>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Code</label>
+          <input type="text" name="discount_code[code]" required placeholder="SUMMER25"
+                 class="w-full border border-gray-200 rounded-xl px-4 py-3 uppercase font-mono text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Type</label>
+          <select name="discount_code[discount_type]"
+                  class="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <option value="percentage">Percentage (%)</option>
+            <option value="fixed">Fixed Amount ($)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Amount</label>
+          <input type="number" name="discount_code[amount]" required min="1" placeholder="10"
+                 class="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <p class="text-xs text-gray-400 mt-1">For percentage: 10 = 10%. For fixed: 1000 = $10.00</p>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Max Uses (optional)</label>
+          <input type="number" name="discount_code[max_uses]" min="1" placeholder="Unlimited"
+                 class="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">Expires At (optional)</label>
+          <input type="datetime-local" name="discount_code[expires_at]"
+                 class="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+        </div>
+        <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-xl transition-colors">
+          Create Code
+        </button>
+      <% end %>
+    </div>
+  </div>
+</div>

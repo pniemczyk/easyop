@@ -71,7 +71,13 @@ module Easyop
           return super unless self.class.name # skip anonymous classes
 
           start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          super.tap do
+          super
+        ensure
+          # Always record — including when raise_on_failure: true raises Ctx::Failure
+          # (e.g. when this operation is a step inside a Flow). Without the ensure
+          # branch the tap block would be skipped and failures inside flows would
+          # never be persisted.
+          if start
             ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round(2)
             _recording_persist!(ctx, model, ms)
           end

@@ -1,0 +1,159 @@
+<% content_for :page_title, "Operation Logs" %>
+
+<!-- Filters -->
+<div class="flex gap-3 mb-6 flex-wrap items-center">
+  <div class="flex gap-2 flex-wrap">
+    <%= link_to "All", admin_operation_logs_path, class: "text-sm px-3 py-1.5 rounded-lg font-medium #{params[:success].nil? && params[:category].blank? && params[:operation].blank? ? 'bg-indigo-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}" %>
+    <%= link_to "✓ Success", admin_operation_logs_path(success: "true"), class: "text-sm px-3 py-1.5 rounded-lg font-medium #{params[:success] == 'true' ? 'bg-green-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}" %>
+    <%= link_to "✗ Failures", admin_operation_logs_path(success: "false"), class: "text-sm px-3 py-1.5 rounded-lg font-medium #{params[:success] == 'false' ? 'bg-red-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}" %>
+    <%= link_to "Order Flow", admin_operation_logs_path(category: "orders"), class: "text-sm px-3 py-1.5 rounded-lg font-medium #{params[:category] == 'orders' ? 'bg-purple-600 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}" %>
+    <%= link_to "Payments", admin_operation_logs_path(operation: "Orders::ProcessPayment"), class: "text-sm px-3 py-1.5 rounded-lg font-medium #{params[:operation] == 'Orders::ProcessPayment' ? 'bg-orange-500 text-white' : 'bg-white border border-gray-200 text-gray-600 hover:border-gray-300'}" %>
+  </div>
+
+  <% if @operations.any? %>
+    <div class="ml-auto">
+      <form method="get" action="<%= admin_operation_logs_path %>" class="flex items-center gap-2">
+        <select name="operation" onchange="this.form.submit()"
+                class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-500">
+          <option value="">All operations</option>
+          <% @operations.each do |op| %>
+            <option value="<%= op %>" <%= params[:operation] == op ? 'selected' : '' %>><%= op.gsub("::", " / ") %></option>
+          <% end %>
+        </select>
+      </form>
+    </div>
+  <% end %>
+</div>
+
+<div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+  <table class="w-full">
+    <thead>
+      <tr class="bg-gray-50 border-b border-gray-100">
+        <th class="w-6 px-4 py-3"></th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Operation</th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+        <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Duration</th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Time</th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Error / Info</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @logs.each_with_index do |log, i| %>
+        <%
+          params_json = begin; JSON.parse(log.params_data.to_s); rescue; nil; end
+          gateway     = params_json&.dig("payment_gateway_response")
+          has_details = params_json.present?
+          row_id      = "log-details-#{log.id}"
+        %>
+        <tr class="border-t border-gray-50 hover:bg-gray-50 transition-colors cursor-default"
+            <% if has_details %>onclick="toggleDetails('<%= row_id %>')"<% end %>>
+          <td class="px-4 py-3 text-center">
+            <% if has_details %>
+              <svg id="<%= row_id %>-chevron" style="width:1em;height:1em" class=" text-gray-400 transition-transform inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+              </svg>
+            <% end %>
+          </td>
+          <td class="px-4 py-3">
+            <p class="text-sm font-mono font-medium text-gray-800"><%= log.operation_name.gsub("::", " :: ") %></p>
+          </td>
+          <td class="px-4 py-3">
+            <% if log.success? %>
+              <span class="inline-flex items-center gap-1.5 text-xs font-semibold text-green-700 bg-green-50 px-2.5 py-1 rounded-full">
+                <span class="w-1.5 h-1.5 bg-green-500 rounded-full"></span>OK
+              </span>
+            <% else %>
+              <span class="inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 bg-red-50 px-2.5 py-1 rounded-full">
+                <span class="w-1.5 h-1.5 bg-red-500 rounded-full"></span>Failed
+              </span>
+            <% end %>
+          </td>
+          <td class="px-4 py-3 text-xs text-gray-400 text-right font-mono whitespace-nowrap">
+            <%= "%.2f" % log.duration_ms.to_f %>ms
+          </td>
+          <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
+            <%= log.performed_at.strftime("%b %d %H:%M:%S") %>
+          </td>
+          <td class="px-4 py-3 text-xs max-w-[240px]">
+            <% if log.error_message.present? %>
+              <span class="text-red-500 truncate block"><%= log.error_message %></span>
+            <% elsif gateway&.dig("reference").present? %>
+              <span class="text-green-600 font-mono truncate block"><%= gateway["reference"] %></span>
+            <% elsif params_json&.dig("payment_reference").present? %>
+              <span class="text-green-600 font-mono truncate block"><%= params_json["payment_reference"] %></span>
+            <% end %>
+          </td>
+        </tr>
+
+        <% if has_details %>
+          <tr id="<%= row_id %>" class="hidden border-t-0">
+            <td colspan="6" class="px-4 pb-4 pt-0">
+              <div class="ml-8 rounded-xl border border-gray-100 bg-gray-50 p-4 text-xs space-y-4">
+
+                <% if gateway %>
+                  <!-- Payment gateway block -->
+                  <div>
+                    <p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1.5">
+                      <svg style="width:1em;height:1em;display:inline-block;vertical-align:middle" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"/>
+                      </svg>
+                      Payment Gateway Response
+                    </p>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1.5">
+                      <% gateway.each do |key, val| %>
+                        <% next if val.nil? %>
+                        <div class="flex flex-col">
+                          <span class="text-gray-400 uppercase tracking-wide" style="font-size:10px"><%= key.to_s.tr("_", " ") %></span>
+                          <span class="font-mono font-semibold <%= key.to_s == 'status' ? (val == 'succeeded' ? 'text-green-600' : 'text-red-600') : 'text-gray-700' %>">
+                            <%= val %>
+                          </span>
+                        </div>
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+
+                <% other = params_json&.except("payment_gateway_response", "order", "event", "items", "current_user") %>
+                <% if other.present? %>
+                  <!-- Other ctx fields -->
+                  <div>
+                    <p class="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">Context Snapshot</p>
+                    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-1.5">
+                      <% other.each do |key, val| %>
+                        <% next if val.nil? || (val.is_a?(Hash) && val.empty?) %>
+                        <div class="flex flex-col">
+                          <span class="text-gray-400 uppercase tracking-wide" style="font-size:10px"><%= key.to_s.tr("_", " ") %></span>
+                          <span class="font-mono font-semibold text-gray-700 truncate">
+                            <% if val.is_a?(Hash) %>{ <%= val.map { |k,v| "#{k}: #{v}" }.join(", ") %> }<% else %><%= val %><% end %>
+                          </span>
+                        </div>
+                      <% end %>
+                    </div>
+                  </div>
+                <% end %>
+
+              </div>
+            </td>
+          </tr>
+        <% end %>
+      <% end %>
+    </tbody>
+  </table>
+  <% if @logs.empty? %>
+    <div class="py-12 text-center">
+      <p class="text-sm text-gray-400">No operation logs yet.</p>
+      <p class="text-xs text-gray-300 mt-1">Operations are logged automatically when EasyOp runs.</p>
+    </div>
+  <% end %>
+</div>
+
+<script>
+  function toggleDetails(id) {
+    const row     = document.getElementById(id);
+    const chevron = document.getElementById(id + '-chevron');
+    if (!row) return;
+    const hidden = row.classList.toggle('hidden');
+    chevron?.classList.toggle('rotate-90', !hidden);
+  }
+</script>

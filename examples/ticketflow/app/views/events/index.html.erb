@@ -1,0 +1,87 @@
+<% content_for :title, "Browse Events" %>
+
+<!-- Hero section -->
+<div class="bg-gradient-to-br from-indigo-600 via-purple-600 to-pink-500 text-white py-20">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+    <h1 class="text-5xl font-extrabold tracking-tight mb-4">Discover Amazing Events</h1>
+    <p class="text-xl text-indigo-100 max-w-2xl mx-auto">Get tickets to concerts, conferences, festivals, and more. All in one place.</p>
+  </div>
+</div>
+
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+  <% if @events.any? %>
+    <div class="flex items-center justify-between mb-8">
+      <h2 class="text-2xl font-bold text-gray-900">Upcoming Events</h2>
+      <span class="text-sm text-gray-500"><%= @events.count %> event<%= @events.count == 1 ? "" : "s" %></span>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+      <% @events.each do |event| %>
+        <div class="bg-white rounded-2xl shadow-sm hover:shadow-lg transition-all duration-300 overflow-hidden group border border-gray-100">
+          <!-- Color header -->
+          <div class="h-36 relative overflow-hidden" style="background: linear-gradient(135deg, <%= event.cover_color %>, <%= event.cover_color %>cc)">
+            <div class="absolute inset-0 bg-black/10"></div>
+            <div class="absolute bottom-4 left-4 right-4">
+              <span class="inline-block bg-white/20 backdrop-blur text-white text-xs font-semibold px-3 py-1 rounded-full">
+                <%= event.starts_at.strftime("%b %d, %Y") %>
+              </span>
+            </div>
+          </div>
+
+          <!-- Content -->
+          <div class="p-6">
+            <h3 class="text-lg font-bold text-gray-900 mb-1 group-hover:text-indigo-600 transition-colors line-clamp-2">
+              <%= event.title %>
+            </h3>
+            <% if event.venue.present? %>
+              <p class="text-sm text-gray-500 flex items-center gap-1 mb-3">
+                <svg class="flex-shrink-0" style="width:1rem;height:1rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+                </svg>
+                <%= event.venue %><% if event.location.present? %>, <%= event.location %><% end %>
+              </p>
+            <% end %>
+            <p class="text-sm text-gray-500 flex items-center gap-1 mb-4">
+              <svg class="flex-shrink-0" style="width:1rem;height:1rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <%= event.starts_at.strftime("%I:%M %p") %>
+            </p>
+
+            <div class="flex items-center justify-between pt-4 border-t border-gray-100">
+              <% min_price = event.ticket_types.minimum(:price_cents) %>
+              <% if min_price %>
+                <div>
+                  <p class="text-xs text-gray-400 uppercase tracking-wide">From</p>
+                  <p class="text-lg font-bold text-gray-900">
+                    <% if min_price == 0 %>
+                      <span class="text-green-600">Free</span>
+                    <% else %>
+                      $<%= "%.2f" % (min_price / 100.0) %>
+                    <% end %>
+                  </p>
+                </div>
+              <% else %>
+                <div></div>
+              <% end %>
+              <%= link_to event_path(event.slug), class: "bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors" do %>
+                Get Tickets
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
+    </div>
+  <% else %>
+    <div class="text-center py-24">
+      <div class="w-20 h-20 bg-indigo-50 rounded-full flex items-center justify-center mx-auto mb-4">
+        <svg class="text-indigo-300" style="width:2.5rem;height:2.5rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+      </div>
+      <h3 class="text-xl font-semibold text-gray-700 mb-2">No upcoming events</h3>
+      <p class="text-gray-500">Check back soon for new events!</p>
+    </div>
+  <% end %>
+</div>

@@ -13,7 +13,7 @@ description: >
   implement the operation/command/service-object pattern, wrap business logic in a
   testable object, chain operations in sequence, or register callbacks before
   executing a flow.
-version: 0.1.0
+version: 0.1.1
 ---
 
 # EasyOp Skill

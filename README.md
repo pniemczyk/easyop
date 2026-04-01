@@ -983,15 +983,13 @@ ProcessCheckout.prepare
 ruby examples/usage.rb
 ```
 
-## Example Rails App
+## Example Rails Apps
 
-A full Rails 8 blog application demonstrating every EasyOp feature in real-world code lives in `/examples/easyop_test_app/`. It is **not included in the gem** — only in the repository.
+Two full Rails 8 applications live in `/examples/`. Neither is included in the gem — repository only.
 
-```
-/examples/easyop_test_app/
-```
+### Blog App — `easyop_test_app`
 
-The app covers:
+A blog + newsletter app demonstrating the full EasyOp feature set.
 
 | Feature | Where to look |
 |---|---|
@@ -1006,16 +1004,39 @@ The app covers:
 | Transactional plugin | `ApplicationOperation` → all DB ops wrapped in transactions |
 | Rails controller integration | `app/controllers/articles_controller.rb`, `transfers_controller.rb` |
 
-**Running the example app:**
-
 ```bash
-cd /examples/easyop_test_app
+cd examples/easyop_test_app
 bundle install
 bin/rails db:create db:migrate db:seed
 bin/rails server -p 3002
 ```
 
 Seed accounts: `alice@example.com` / `password123` (500 credits), `bob`, `carol`, `dave` (0 credits — tests insufficient-funds error).
+
+### TicketFlow — `ticketflow`
+
+A full event ticket-selling platform with modern Tailwind UI and admin panel. Every operation is powered by EasyOp.
+
+| Feature | Where to look |
+|---|---|
+| Multi-step checkout Flow | `app/operations/flows/checkout.rb` — 6 chained operations |
+| `skip_if` (optional discount step) | `app/operations/orders/apply_discount.rb` |
+| Rollback on payment failure | `app/operations/orders/process_payment.rb#rollback` |
+| `prepare` + callbacks in controller | `app/controllers/checkouts_controller.rb` |
+| Recording plugin → operation logs | `app/operations/application_operation.rb` |
+| Admin metrics dashboard | `app/controllers/admin/dashboard_controller.rb` |
+| Admin order refund operation | `app/operations/admin/refund_order.rb` |
+| Virtual ticket generation | `app/operations/tickets/generate_tickets.rb` |
+
+```bash
+cd examples/ticketflow
+bundle install
+bin/rails db:create db:migrate db:seed
+bin/rails server -p 3001
+```
+
+Seed accounts: `admin@ticketflow.com` / `password123` (admin), `user@ticketflow.com` / `password123` (customer).
+Discount codes: `SAVE10` (10% off), `FLAT20` ($20 off), `VIP50` (50% off).
 
 ## Running Specs
 

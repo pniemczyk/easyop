@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-04-01
+
+### Fixed
+
+- **`Plugins::Recording`** — operations executed as steps inside a `Flow` were not recorded on failure. Flows run each step with `raise_on_failure: true`, causing `Ctx::Failure` to propagate and skip the `.tap` block used to persist the log entry. Fixed by moving the persistence call into an `ensure` block so every execution — successful or failed — is always recorded.
+
 ## [0.1.0] — 2026-04-01
 
 ### Added
@@ -37,5 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/easyop_test_app/` — full Rails 8 blog application demonstrating all features in real-world code
 - `examples/usage.rb` — 13 runnable plain-Ruby examples
 
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/pniemczyk/easyop/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pniemczyk/easyop/releases/tag/v0.1.0

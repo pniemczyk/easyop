@@ -3,6 +3,9 @@
 # ── Gem build output ───────────────────────────────────────────────────────────
 *.gem
 
+# ── Test coverage ──────────────────────────────────────────────────────────────
+/coverage/
+
 # ── OS / editor noise ──────────────────────────────────────────────────────────
 .DS_Store
 .idea/
@@ -47,3 +50,20 @@
 
 # Minitest coverage
 /examples/easyop_test_app/coverage/
+
+# ── TicketFlow example app — runtime artifacts ─────────────────────────────────
+examples/ticketflow/config/master.key
+examples/ticketflow/config/credentials/*.key
+examples/ticketflow/log/*.log
+examples/ticketflow/*.sqlite3
+examples/ticketflow/*.sqlite3-journal
+examples/ticketflow/*.sqlite3-shm
+examples/ticketflow/*.sqlite3-wal
+examples/ticketflow/tmp/*
+!examples/ticketflow/tmp/.keep
+examples/ticketflow/.bundle
+examples/ticketflow/vendor/bundle
+examples/ticketflow/node_modules
+examples/ticketflow/public/assets
+examples/ticketflow/public/packs
+examples/ticketflow/coverage

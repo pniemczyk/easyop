@@ -1,0 +1,120 @@
+<% content_for :title, @event.title %>
+
+<!-- Hero section -->
+<div class="relative text-white py-24" style="background: linear-gradient(135deg, <%= @event.cover_color %>, <%= @event.cover_color %>99)">
+  <div class="absolute inset-0 bg-black/30"></div>
+  <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div class="max-w-3xl">
+      <p class="text-sm font-medium text-white/70 uppercase tracking-widest mb-3">
+        <%= @event.starts_at.strftime("%A, %B %d, %Y") %>
+      </p>
+      <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight mb-4"><%= @event.title %></h1>
+      <% if @event.venue.present? %>
+        <p class="text-lg text-white/80 flex items-center gap-2">
+          <svg style="width:1.25rem;height:1.25rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+          </svg>
+          <%= @event.venue %><% if @event.location.present? %>, <%= @event.location %><% end %>
+        </p>
+      <% end %>
+    </div>
+  </div>
+</div>
+
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-10">
+    <!-- Left: Event details -->
+    <div class="lg:col-span-2 space-y-8">
+      <!-- Event details card -->
+      <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+        <h2 class="text-xl font-bold text-gray-900 mb-4">About this event</h2>
+        <% if @event.description.present? %>
+          <div class="prose text-gray-700 leading-relaxed">
+            <%= simple_format @event.description %>
+          </div>
+        <% else %>
+          <p class="text-gray-500 italic">No description provided.</p>
+        <% end %>
+      </div>
+
+      <!-- Event info -->
+      <div class="bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+        <h2 class="text-xl font-bold text-gray-900 mb-6">Event Details</h2>
+        <div class="space-y-4">
+          <div class="flex items-center gap-4">
+            <div class="w-10 h-10 bg-indigo-50 rounded-lg flex items-center justify-center flex-shrink-0">
+              <svg class="text-indigo-600" style="width:1.25rem;height:1.25rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+              </svg>
+            </div>
+            <div>
+              <p class="text-xs text-gray-400 uppercase tracking-wide">Date & Time</p>
+              <p class="font-semibold text-gray-900"><%= @event.starts_at.strftime("%B %d, %Y at %I:%M %p") %></p>
+              <% if @event.ends_at.present? %>
+                <p class="text-sm text-gray-500">Until <%= @event.ends_at.strftime("%I:%M %p") %></p>
+              <% end %>
+            </div>
+          </div>
+
+          <% if @event.venue.present? %>
+            <div class="flex items-center gap-4">
+              <div class="w-10 h-10 bg-indigo-50 rounded-lg flex items-center justify-center flex-shrink-0">
+                <svg class="text-indigo-600" style="width:1.25rem;height:1.25rem;flex-shrink:0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                </svg>
+              </div>
+              <div>
+                <p class="text-xs text-gray-400 uppercase tracking-wide">Venue</p>
+                <p class="font-semibold text-gray-900"><%= @event.venue %></p>
+                <% if @event.location.present? %>
+                  <p class="text-sm text-gray-500"><%= @event.location %></p>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Ticket types -->
+    <div class="space-y-4">
+      <h2 class="text-xl font-bold text-gray-900">Choose Your Tickets</h2>
+      <% if @ticket_types.any? %>
+        <% @ticket_types.each do |tt| %>
+          <div class="bg-white rounded-2xl shadow-sm border <%= tt.sold_out? ? 'border-gray-100 opacity-60' : 'border-gray-100 hover:border-indigo-200 hover:shadow-md' %> p-6 transition-all">
+            <div class="flex items-start justify-between mb-2">
+              <div>
+                <h3 class="font-bold text-gray-900"><%= tt.name %></h3>
+                <% if tt.description.present? %>
+                  <p class="text-sm text-gray-500 mt-1"><%= tt.description %></p>
+                <% end %>
+              </div>
+              <div class="text-right">
+                <p class="text-xl font-bold text-indigo-600">
+                  <% if tt.price_cents == 0 %>Free<% else %>$<%= "%.2f" % tt.price %><% end %>
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center justify-between mt-4 pt-4 border-t border-gray-50">
+              <% if tt.sold_out? %>
+                <span class="text-sm font-semibold text-red-500 bg-red-50 px-3 py-1 rounded-full">Sold Out</span>
+              <% else %>
+                <span class="text-xs text-gray-400"><%= tt.available_count %> remaining</span>
+              <% end %>
+            </div>
+          </div>
+        <% end %>
+
+        <% unless @ticket_types.all?(&:sold_out?) %>
+          <%= link_to new_event_checkout_path(@event.slug), class: "block w-full text-center bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-4 rounded-xl text-lg transition-colors shadow-lg shadow-indigo-200 mt-6" do %>
+            Buy Tickets
+          <% end %>
+        <% end %>
+      <% else %>
+        <div class="bg-white rounded-2xl border border-gray-100 p-8 text-center">
+          <p class="text-gray-500">No tickets available yet.</p>
+        </div>
+      <% end %>
+    </div>
+  </div>
+</div>
