@@ -38,7 +38,7 @@ Rails, Sinatra, Hanami, or standalone Ruby scripts.
 lib/
   easyop.rb                        # Entry point — requires all modules
   easyop/
-    version.rb                     # VERSION = "0.1.1"
+    version.rb                     # VERSION = "0.1.2"
     configuration.rb               # Easyop.configure { |c| ... }
     ctx.rb                         # Easyop::Ctx — the shared context/result object
     hooks.rb                       # Easyop::Hooks — before/after/around DSL

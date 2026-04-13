@@ -672,6 +672,20 @@ Newsletter::SendBroadcast.call_async(attrs, wait_until: Date.tomorrow.noon)
 Newsletter::SendBroadcast.call_async(attrs, queue: "low_priority")
 ```
 
+**`queue` DSL** — declare the default queue directly on a class (or a shared base class) instead of at plugin install time:
+
+```ruby
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather   # all Weather ops use the "weather" queue by default
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override just for this class
+end
+```
+
+The `queue` setting is inherited by subclasses and can be overridden at any level. Accepts `Symbol` or `String`. A per-call `queue:` argument to `.call_async` always takes precedence.
+
 **ActiveRecord objects** are serialized by `(class, id)` and re-fetched in the job:
 
 ```ruby

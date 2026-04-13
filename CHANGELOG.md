@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] — 2026-04-13
+
+### Added
+
+- **`Plugins::Async` — `queue` DSL** — a new `queue` class method for declaring the default queue directly on an operation class (or a shared base class). This lets subclasses override the queue set at plugin install time without re-declaring the plugin:
+
+  ```ruby
+  class Weather::BaseOperation < ApplicationOperation
+    queue :weather   # all Weather ops use the "weather" queue
+  end
+
+  class Weather::FetchForecast < Weather::BaseOperation
+    # inherits queue :weather automatically
+  end
+
+  class Weather::CleanupExpiredDays < Weather::BaseOperation
+    queue :low_priority   # override just for this class
+  end
+  ```
+
+  Accepts both `Symbol` and `String`. The setting is inherited by subclasses and can be overridden at any level of the hierarchy.
+
 ## [0.1.1] — 2026-04-01
 
 ### Fixed
@@ -43,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/easyop_test_app/` — full Rails 8 blog application demonstrating all features in real-world code
 - `examples/usage.rb` — 13 runnable plain-Ruby examples
 
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/pniemczyk/easyop/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/pniemczyk/easyop/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pniemczyk/easyop/releases/tag/v0.1.0

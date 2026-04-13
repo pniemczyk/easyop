@@ -13,7 +13,7 @@ description: >
   implement the operation/command/service-object pattern, wrap business logic in a
   testable object, chain operations in sequence, or register callbacks before
   executing a flow.
-version: 0.1.1
+version: 0.1.2
 ---
 
 # EasyOp Skill
@@ -314,6 +314,18 @@ Adds `.call_async(attrs, wait:, wait_until:, queue:)`. Serializes AR objects by 
 ```ruby
 MyOp.call_async(user: @user, amount: 100)          # enqueue now
 MyOp.call_async(user: @user, wait: 5.minutes)      # enqueue with delay
+```
+
+Use the `queue` DSL to declare the default queue on a class without re-declaring the plugin:
+
+```ruby
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather   # inherited by all Weather subclasses
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override at leaf level
+end
 ```
 
 ### Transactional

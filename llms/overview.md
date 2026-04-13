@@ -228,7 +228,19 @@ Opt out: `recording false`.
 
 Adds `.call_async(attrs, wait:, wait_until:, queue:)`.
 Serializes AR objects as `{ "__ar_class", "__ar_id" }` and re-fetches in the job.
-Default queue set via `plugin Easyop::Plugins::Async, queue: "myqueue"`.
+Default queue set via `plugin Easyop::Plugins::Async, queue: "myqueue"` or via the `queue` class method DSL:
+
+```ruby
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather   # overrides the plugin-level default; inherited by subclasses
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override at leaf class level
+end
+```
+
+`queue` accepts `Symbol` or `String`. Per-call `queue:` argument to `.call_async` always wins.
 
 ### Transactional
 

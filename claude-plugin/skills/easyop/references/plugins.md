@@ -112,10 +112,24 @@ plugin Easyop::Plugins::Async, queue: "default"
 **Enqueueing:**
 ```ruby
 MyOp.call_async(attrs)                                  # default queue
-MyOp.call_async(attrs, queue: "low")                    # override queue
+MyOp.call_async(attrs, queue: "low")                    # override queue per call
 MyOp.call_async(attrs, wait: 10.minutes)                # delay
 MyOp.call_async(attrs, wait_until: Date.tomorrow.noon)  # scheduled
 ```
+
+**`queue` DSL** — declare or override the default queue directly on a class without re-declaring the plugin. Accepts `Symbol` or `String`. Inherited by subclasses; can be overridden at any level:
+
+```ruby
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather   # all Weather ops use "weather" by default
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override at leaf level
+end
+```
+
+Priority (highest → lowest): per-call `queue:` argument → `queue` DSL → `plugin ... queue:` option → `"default"`.
 
 **Serialization:** ActiveRecord objects are serialized as `{ "__ar_class" => "User", "__ar_id" => 42 }` and re-fetched in the job. Only pass: `String`, `Integer`, `Float`, `Boolean`, `nil`, `Hash`, `Array`, or `ActiveRecord::Base`.
 

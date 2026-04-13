@@ -27,6 +27,18 @@ module Easyop
       end
 
       module ClassMethods
+        # Declares a non-default queue for this operation class and its subclasses.
+        #
+        # @example
+        #   class Weather::BaseOperation < ApplicationOperation
+        #     queue :weather
+        #   end
+        #
+        # @param name [String, Symbol] queue name
+        def queue(name)
+          @_async_default_queue = name.to_s
+        end
+
         # Enqueue the operation as a background job.
         #
         #   MyOp.call_async(email: "x@y.com")

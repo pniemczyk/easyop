@@ -88,7 +88,7 @@ end
 # :password, :password_confirmation, :token, :secret, :api_key
 # ActiveRecord objects are serialized as { "id" => 42, "class" => "User" }
 
-# ── Plugin 3: Async ─���─────────────────────────────────────────────────────────
+# ── Plugin 3: Async ──────────────────────────────────────────────────────────
 
 class Reports::GeneratePDF < ApplicationOperation
   plugin Easyop::Plugins::Async, queue: "reports"
@@ -121,6 +121,34 @@ Orders::SendConfirmation.call_async(order: @order, user: current_user)
 
 # The job class is created lazily on first call_async:
 Easyop::Plugins::Async::Job  # => the ActiveJob subclass
+
+# queue DSL — declare the default queue on a class without re-declaring the plugin.
+# Accepts Symbol or String. Inherited by subclasses; can be overridden at any level.
+# Priority: per-call queue: argument > queue DSL > plugin queue: option > "default"
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather
+end
+
+class Weather::FetchForecast < Weather::BaseOperation
+  # inherits queue :weather automatically
+  def call
+    ctx.forecast = WeatherApi.fetch(ctx.location)
+  end
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override just for this class
+
+  def call
+    WeatherRecord.where('recorded_at < ?', 30.days.ago).delete_all
+  end
+end
+
+Weather::FetchForecast._async_default_queue      # => "weather"
+Weather::CleanupExpiredDays._async_default_queue # => "low_priority"
+
+# Per-call override still takes precedence:
+Weather::CleanupExpiredDays.call_async(queue: "critical")
 
 # ── Plugin 4: Transactional ───────────────────────────────────────────────────
 

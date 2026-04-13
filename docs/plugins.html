@@ -12,7 +12,7 @@
 <aside class="sidebar">
   <div class="sidebar-header">
     <a href="index.html" class="sidebar-logo">EasyOp</a>
-    <span class="sidebar-version">v0.1.0</span>
+    <span class="sidebar-version">v0.1.2</span>
   </div>
   <nav class="sidebar-nav">
     <div class="nav-group">
@@ -230,6 +230,27 @@ Reports::GeneratePDF.call_async(report_id: 123, wait_until: Date.tomorrow.noon)<
         </tbody>
       </table>
 
+      <h3>Queue DSL</h3>
+      <p>Use the <code>queue</code> class method to declare or override the default queue directly on a class without re-declaring the plugin. Accepts <code>Symbol</code> or <code>String</code>. The setting is inherited by subclasses and can be overridden at any level.</p>
+      <pre><code class="language-ruby">class Weather::BaseOperation &lt; ApplicationOperation
+  queue :weather   # all Weather ops use the "weather" queue
+end
+
+class Weather::FetchForecast &lt; Weather::BaseOperation
+  # inherits queue :weather automatically
+end
+
+class Weather::CleanupExpiredDays &lt; Weather::BaseOperation
+  queue :low_priority   # override just for this class
+end
+
+Weather::FetchForecast._async_default_queue      # => "weather"
+Weather::CleanupExpiredDays._async_default_queue # => "low_priority"</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Priority</strong> (highest → lowest): per-call <code>queue:</code> argument → <code>queue</code> DSL → <code>plugin ... queue:</code> option → <code>"default"</code>.
+      </div>
+
       <h3>Queue inheritance</h3>
       <pre><code class="language-ruby">class BaseOp
   include Easyop::Operation
@@ -382,7 +403,7 @@ end</code></pre>
 end</code></pre>
 
       <footer>
-        EasyOp v0.1.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.1.2 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>

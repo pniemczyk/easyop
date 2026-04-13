@@ -447,6 +447,23 @@ Reports::GenerateMonthlyPDF.call_async(user_id: 1, month: "2024-01", wait: 5.min
 Reports::GenerateMonthlyPDF.call_async(user_id: 1, month: "2024-01", wait_until: Date.tomorrow.noon)
 ```
 
+**`queue` DSL** — override the default queue on a class without re-declaring the plugin:
+
+```ruby
+class Weather::BaseOperation < ApplicationOperation
+  queue :weather   # all Weather ops use the "weather" queue
+end
+
+class Weather::CleanupExpiredDays < Weather::BaseOperation
+  queue :low_priority   # override just for this class
+end
+
+# Per-call override still works (highest priority):
+Weather::CleanupExpiredDays.call_async(attrs, queue: "critical")
+```
+
+The `queue` setting is inherited by subclasses. Accepts `Symbol` or `String`.
+
 ## 22. Transactional plugin
 
 ```ruby

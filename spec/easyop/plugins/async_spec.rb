@@ -168,6 +168,55 @@ RSpec.describe Easyop::Plugins::Async do
     end
   end
 
+  # ── .queue DSL ────────────────────────────────────────────────────────────────
+
+  describe ".queue" do
+    it "overrides the plugin-level default queue on the class itself" do
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("AsyncQueueDslOp", klass)
+        klass.plugin(Easyop::Plugins::Async, queue: "default")
+        klass.queue(:priority)
+      end
+      op.call_async
+      expect(enqueued_jobs.last[:options][:queue]).to eq("priority")
+    end
+
+    it "accepts a string queue name" do
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("AsyncQueueStringOp", klass)
+        klass.plugin(Easyop::Plugins::Async)
+        klass.queue("critical")
+      end
+      expect(op._async_default_queue).to eq("critical")
+    end
+
+    it "is inherited by subclasses" do
+      parent = make_op { def call; end }.tap do |klass|
+        stub_const("AsyncQueueParentOp", klass)
+        klass.plugin(Easyop::Plugins::Async)
+        klass.queue(:weather)
+      end
+      child = Class.new(parent) { def call; end }
+      stub_const("AsyncQueueChildOp", child)
+      expect(child._async_default_queue).to eq("weather")
+    end
+
+    it "can be overridden again in a subclass" do
+      parent = make_op { def call; end }.tap do |klass|
+        stub_const("AsyncQueueOverrideParent", klass)
+        klass.plugin(Easyop::Plugins::Async)
+        klass.queue(:weather)
+      end
+      child = Class.new(parent) do
+        def call; end
+        queue :notifications
+      end
+      stub_const("AsyncQueueOverrideChild", child)
+      expect(child._async_default_queue).to eq("notifications")
+      expect(parent._async_default_queue).to eq("weather")
+    end
+  end
+
   # ── _async_default_queue inheritance ──────────────────────────────────────────
 
   describe "_async_default_queue inheritance" do
