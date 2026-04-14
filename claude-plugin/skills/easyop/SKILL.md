@@ -16,7 +16,7 @@ description: >
   implement the operation/command/service-object pattern, wrap business logic in a
   testable object, chain operations in sequence, register callbacks before
   executing a flow, or wire domain events between decoupled operations.
-version: 0.1.3
+version: 0.1.4
 ---
 
 # EasyOp Skill
