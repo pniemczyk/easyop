@@ -1,21 +1,6 @@
 ---
 name: easyop
-description: >
-  This skill should be used when the user asks to "create an operation", "add an
-  operation", "use easyop", "replace a service object with an operation", "compose
-  operations into a flow", "use Easyop::Flow", "use ctx.fail!", "use prepare",
-  "add before/after hooks to an operation", "rescue exceptions in an operation",
-  "add typed params to an operation", "use skip_if", "add rollback to a flow step",
-  "how is easyop different from interactor", "use plugins", "add instrumentation to
-  operations", "record operation executions", "run operations in background",
-  "wrap operation in transaction", "build a custom plugin", "emit domain events",
-  "subscribe to domain events", "publish domain events from an operation", "use
-  Easyop::Plugins::Events", "use Easyop::Plugins::EventHandlers", "use event bus",
-  "use easyop events", "handle domain events with easyop", or when working with the
-  easyop gem in any Ruby or Rails project. Also activate when the user wants to
-  implement the operation/command/service-object pattern, wrap business logic in a
-  testable object, chain operations in sequence, register callbacks before
-  executing a flow, or wire domain events between decoupled operations.
+description: Use when working with the easyop gem — operations, flows, ctx.fail!, hooks, schema DSL, skip_if, rollback, plugins (Recording, Async, Transactional, Events), or the Ruby service-object / command pattern.
 version: 0.1.4
 ---
 
