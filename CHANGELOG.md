@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-04-14
+
+### Added
+
+- **Flow-tracing forwarding in `Easyop::Flow`** — `CallBehavior#call` now automatically sets the `__recording_parent_*` ctx keys before running steps, so every child operation's log entry carries the flow class as its `parent_operation_name` and `parent_reference_id`. This works even when Recording is not installed on the flow class itself (bare `include Easyop::Flow`). When Recording IS installed (recommended: inherit from ApplicationOperation and add `transactional false`), the flow appears in the log as the root entry and RunWrapper handles the ctx setup — no double-setup occurs.
+
+  ```ruby
+  # Bare flow — Recording on steps only; flow itself is not recorded but
+  # steps correctly show parent_operation_name: "Flows::Checkout"
+  class Flows::Checkout
+    include Easyop::Flow
+    flow Orders::CreateOrder, Orders::ProcessPayment
+  end
+
+  # Recommended — flow is recorded as root, steps as children:
+  class Flows::Checkout < ApplicationOperation
+    include Easyop::Flow
+    transactional false   # steps manage their own transactions
+    flow Orders::CreateOrder, Orders::ProcessPayment
+  end
+  ```
+
+  Result in operation_logs:
+  ```
+  Flows::Checkout         root=aaa  ref=bbb  parent=nil
+    Orders::CreateOrder   root=aaa  ref=ccc  parent=Flows::Checkout/bbb
+    Orders::ProcessPayment root=aaa  ref=ddd  parent=Flows::Checkout/bbb
+  ```
+
+- **`record_result` DSL for `Easyop::Plugins::Recording`** — selectively persist ctx output data into a new optional `result_data :text` column (stored as JSON). Supports three forms:
+
+  ```ruby
+  # Attrs form — one or more ctx keys
+  record_result attrs: :invoice_id
+  record_result attrs: [:invoice_id, :total]
+
+  # Block form — custom extraction
+  record_result { |ctx| { total: ctx.total, items: ctx.items.count } }
+
+  # Symbol form — delegates to a private instance method
+  record_result :build_result
+  ```
+
+  Plugin-level default (inherited by all subclasses):
+  ```ruby
+  plugin Easyop::Plugins::Recording, model: OperationLog, record_result: { attrs: :metadata }
+  ```
+
+  Class-level `record_result` overrides the plugin-level default. Missing ctx keys produce `nil` (no error). ActiveRecord objects are serialized as `{ id:, class: }`. Serialization errors are swallowed. The `result_data` column is silently skipped when absent from the model table — fully backward-compatible.
+
+### Fixed
+
+- **`Easyop::Schema` type-mismatch warning suppressed when `$VERBOSE` is `nil`** — `warn` is a no-op in Ruby when `$VERBOSE` is `nil` (e.g. when running under certain test setups or with `-W0`). Changed to `$stderr.puts` so the `[EasyOp]` type-mismatch message always reaches stderr regardless of Ruby's verbosity flag.
+
+- **`Easyop::Schema` spec `strict_types` contamination across examples** — Setting `strict_types = true` inside an example without a corresponding teardown left the global config dirty for later examples. Added `after(:each) { Easyop.reset_config! }` at the top-level `RSpec.describe` so every example begins with a clean configuration.
+
+- **`Easyop::Plugins::Instrumentation` flaky duration assertion** — The `:duration` payload is computed as `(elapsed_ms).round(2)`, which rounds to `0.0` for operations completing in under 0.005 ms. Relaxed the spec assertion from `be > 0` to `be >= 0` to reflect that a rounded-to-zero duration is a valid measurement, not an error.
+
 ## [0.1.3] — 2026-04-14
 
 ### Added
@@ -200,5 +258,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/easyop_test_app/` — full Rails 8 blog application demonstrating all features in real-world code
 - `examples/usage.rb` — 13 runnable plain-Ruby examples
 
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/pniemczyk/easyop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pniemczyk/easyop/compare/v0.1.2...v0.1.3

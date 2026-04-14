@@ -26,6 +26,6 @@ Rails.application.routes.draw do
       member { post :refund }
     end
     resources :discount_codes, only: [ :index, :create, :destroy ]
-    resources :operation_logs, only: [ :index ]
+    resources :operation_logs, only: [ :index, :show ]
   end
 end

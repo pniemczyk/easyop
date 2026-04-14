@@ -88,6 +88,19 @@ end
 result = ProcessOrder.call(user: current_user, cart: cart)
 ```
 
+**Recording plugin integration**: `CallBehavior#call` automatically sets `__recording_parent_operation_name` and `__recording_parent_reference_id` in ctx before running steps, so every step log entry links back to the flow. This works with bare `include Easyop::Flow` (flow not recorded, steps carry correct parent) AND when the flow inherits from a recorded base class (flow appears in logs as root, RunWrapper handles ctx):
+
+```ruby
+# Recommended — flow recorded as tree root, steps as children:
+class ProcessOrder < ApplicationOperation
+  include Easyop::Flow
+  transactional false   # steps manage their own transactions
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+```
+
+Forwarding is skipped when `_recording_enabled?` is present on the flow class (i.e. Recording is installed) — RunWrapper already handles it, avoiding double-setup.
+
 ### FlowBuilder (`prepare`)
 
 ```ruby
@@ -234,6 +247,29 @@ Persists every execution to an AR model (`model:` option required).
 Required columns: `operation_name :string`, `success :boolean`, `error_message :string`, `params_data :text`, `duration_ms :float`, `performed_at :datetime`.
 Scrubs `:password`, `:token`, `:secret`, `:api_key`, `:password_confirmation`.
 Opt out: `recording false`.
+
+**Optional flow-tracing columns** (add to get full call-tree visibility):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `root_reference_id` | `string` | Shared UUID across all operations in one execution tree |
+| `reference_id` | `string` | Unique UUID for this specific operation execution |
+| `parent_operation_name` | `string` | Class name of the direct parent operation |
+| `parent_reference_id` | `string` | `reference_id` of the direct parent |
+
+These columns are populated automatically when present in the model table (backward-compatible — missing columns are silently skipped). The plugin uses `__recording_root_reference_id`, `__recording_parent_operation_name`, and `__recording_parent_reference_id` as internal ctx keys (double-underscore prefix) to propagate tracing state through nested calls; these keys are excluded from `params_data`.
+
+**`record_result` DSL** — selectively persist ctx output data into an optional `result_data :text` column (stored as JSON). Three forms:
+
+```ruby
+record_result attrs: :invoice_id                          # one or more ctx keys
+record_result attrs: [:invoice_id, :total]
+record_result { |ctx| { total: ctx.total } }              # block
+record_result :build_result                               # private instance method
+```
+
+Plugin-level default (inherited by subclasses): `plugin ..., record_result: { attrs: :metadata }`.
+Class-level `record_result` overrides the plugin default. Missing ctx keys → `nil`. AR objects → `{ id:, class: }`. Serialization errors swallowed. Column silently skipped when absent (backward-compatible).
 
 ### Async
 

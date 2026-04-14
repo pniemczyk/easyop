@@ -6,8 +6,9 @@ module Flows
   #     or if SendBroadcast itself fails, the broadcast is rolled back
   #   - In practice: Articles::Publish sets ctx.article; SendBroadcast
   #     reads ctx.article, ctx.subject, and ctx.body from the same ctx
-  class PublishAndBroadcast
+  class PublishAndBroadcast < ApplicationOperation
     include Easyop::Flow
+    transactional false
 
     flow Articles::Publish,
          Newsletter::SendBroadcast

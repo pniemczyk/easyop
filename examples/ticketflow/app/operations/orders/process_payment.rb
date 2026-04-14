@@ -1,5 +1,9 @@
 module Orders
   class ProcessPayment < ApplicationOperation
+    # Capture payment outcome in result_data for audit and debugging.
+    # On success: payment_reference + latency. On failure: decline_code.
+    record_result { |ctx| { payment_reference: ctx[:payment_reference], payment_latency_ms: ctx[:payment_latency_ms], decline_code: ctx[:payment_decline_code] }.compact }
+
     def call
       gateway_result = FakePaymentGateway.charge(
         amount_cents: ctx.order.total_cents,

@@ -65,7 +65,7 @@ end
 
 # ── Plugin 2: Recording ───────────────────────────────────────────────────────
 
-# Migration:
+# Minimum migration:
 #   create_table :operation_logs do |t|
 #     t.string   :operation_name, null: false
 #     t.boolean  :success,        null: false
@@ -74,6 +74,71 @@ end
 #     t.float    :duration_ms
 #     t.datetime :performed_at,   null: false
 #   end
+
+# Optional flow-tracing columns (add to enable call-tree reconstruction):
+#   add_column :operation_logs, :root_reference_id,     :string
+#   add_column :operation_logs, :reference_id,          :string
+#   add_column :operation_logs, :parent_operation_name, :string
+#   add_column :operation_logs, :parent_reference_id,   :string
+#   add_index  :operation_logs, :root_reference_id
+#   add_index  :operation_logs, :reference_id, unique: true
+#   add_index  :operation_logs, :parent_reference_id
+#
+# When these columns exist, nested flows are automatically linked:
+#
+#   FullCheckout.call(...)
+#   #   root_reference_id: "aaa-..."  reference_id: "bbb-..."  parent: nil
+#     AuthAndValidate.call(...)
+#     #   root_reference_id: "aaa-..."  reference_id: "ccc-..."  parent: FullCheckout/"bbb-..."
+#       AuthenticateUser.call(...)
+#       #   root_reference_id: "aaa-..."  reference_id: "ddd-..."  parent: AuthAndValidate/"ccc-..."
+#     ProcessPayment.call(...)
+#     #   root_reference_id: "aaa-..."  reference_id: "eee-..."  parent: FullCheckout/"bbb-..."
+#
+# Useful model helpers:
+#   scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+#   def root?; parent_reference_id.nil?; end
+#
+# Query the full execution tree for a given root:
+#   root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference_id: nil)
+#   OperationLog.for_tree(root_log.root_reference_id)
+#   # => all 4 records, oldest-first, showing the full call tree
+
+# Optional result column — add when you want to capture output data:
+#   add_column :operation_logs, :result_data, :text  # stored as JSON
+
+# record_result DSL — three forms:
+#
+# Form 1: attrs — one or more ctx keys
+class PlaceOrder < ApplicationOperation
+  record_result attrs: :order_id
+end
+
+class ProcessPayment < ApplicationOperation
+  record_result attrs: [:charge_id, :amount_cents]
+end
+
+# Form 2: block — custom extraction logic
+class GenerateReport < ApplicationOperation
+  record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
+end
+
+# Form 3: symbol — delegates to a private instance method
+class BuildInvoice < ApplicationOperation
+  record_result :build_result
+
+  private
+
+  def build_result
+    { invoice_id: ctx.invoice.id, total: ctx.total }
+  end
+end
+
+# Plugin-level default — all subclasses inherit unless they declare their own record_result:
+#   plugin Easyop::Plugins::Recording, model: OperationLog,
+#          record_result: { attrs: :metadata }
+# Also accepts: record_result: ->(ctx) { { id: ctx.record_id } }
+#               record_result: :build_result
 
 # Default: all ops are recorded. Opt out per class:
 class Newsletter::SendBroadcast < ApplicationOperation
@@ -87,7 +152,37 @@ end
 
 # Scrubbed keys (never appear in params_data):
 # :password, :password_confirmation, :token, :secret, :api_key
+# Internal tracing keys (__recording_*) are also excluded automatically.
 # ActiveRecord objects are serialized as { "id" => 42, "class" => "User" }
+
+# ── Flow + Recording: full call-tree tracing ──────────────────────────────────
+#
+# For the flow itself to appear in operation_logs as the tree root, inherit from
+# ApplicationOperation and add transactional false (each step manages its own
+# transaction; EasyOp's rollback handles compensation in reverse order).
+#
+require "easyop/flow"
+
+class ProcessCheckout < ApplicationOperation
+  include Easyop::Flow
+  transactional false  # steps own their AR transactions
+
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+
+# Result in operation_logs (with flow-tracing columns present):
+#   ProcessCheckout   root=aaa  ref=bbb  parent=nil
+#     ValidateCart    root=aaa  ref=ccc  parent=ProcessCheckout/bbb
+#     ChargePayment   root=aaa  ref=ddd  parent=ProcessCheckout/bbb
+#     CreateOrder     root=aaa  ref=eee  parent=ProcessCheckout/bbb
+#
+# Fetch the entire execution tree:
+#   root = OperationLog.find_by(operation_name: "ProcessCheckout", parent_reference_id: nil)
+#   OperationLog.for_tree(root.root_reference_id)
+#   # => 4 records, oldest-first, showing the full call tree
+#
+# Bare include Easyop::Flow (without inheriting ApplicationOperation) still works:
+# steps show parent_operation_name correctly, but the flow itself is not recorded.
 
 # ── Plugin 3: Async ──────────────────────────────────────────────────────────
 

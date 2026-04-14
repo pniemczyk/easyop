@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_14_120000) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_14_130000) do
   create_table "articles", force: :cascade do |t|
     t.text "body", null: false
     t.datetime "created_at", null: false
@@ -52,6 +52,14 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_14_120000) do
     t.datetime "performed_at"
     t.boolean "success"
     t.datetime "updated_at", null: false
+    t.string "root_reference_id"
+    t.string "reference_id"
+    t.string "parent_operation_name"
+    t.string "parent_reference_id"
+    t.text "result_data"
+    t.index ["root_reference_id"], name: "index_operation_logs_on_root_reference_id"
+    t.index ["reference_id"], name: "index_operation_logs_on_reference_id", unique: true
+    t.index ["parent_reference_id"], name: "index_operation_logs_on_parent_reference_id"
   end
 
   create_table "subscriptions", force: :cascade do |t|

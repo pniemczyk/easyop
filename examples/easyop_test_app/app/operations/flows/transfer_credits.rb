@@ -4,8 +4,9 @@
 #   - skip_if (via lambda guard): optional fee step
 #   - complex ctx sharing across steps
 #   - transactional false on the Flow itself (each step manages its own transaction)
-class Flows::TransferCredits
+class Flows::TransferCredits < ApplicationOperation
   include Easyop::Flow
+  transactional false  # each step manages its own AR transaction
 
   # ── Debit the sender's credit balance ──────────────────────────────────────
   class DebitSender < ApplicationOperation

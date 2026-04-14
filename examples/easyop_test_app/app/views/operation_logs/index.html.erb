@@ -12,6 +12,9 @@
         <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Operation</th>
         <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Status</th>
         <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Duration</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Parent</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Tree</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Result</th>
         <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Error</th>
         <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Performed At</th>
       </tr>
@@ -19,7 +22,13 @@
     <tbody>
       <% @logs.each do |log| %>
         <tr style="border-bottom: 1px solid #eee;">
-          <td style="padding: 0.5rem; font-family: monospace;"><%= log.operation_name %></td>
+          <td style="padding: 0.5rem; font-family: monospace;">
+            <%# Indent child operations visually %>
+            <% unless log.root? %>
+              <span style="color: #bbb; margin-right: 0.25rem;">↳</span>
+            <% end %>
+            <%= log.operation_name %>
+          </td>
           <td style="padding: 0.5rem;">
             <% if log.success? %>
               <span class="badge badge-published">ok</span>
@@ -28,10 +37,42 @@
             <% end %>
           </td>
           <td style="padding: 0.5rem;"><%= log.duration_ms ? "#{log.duration_ms.round(1)}ms" : "—" %></td>
+          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.8rem; color: #666;">
+            <%= log.parent_operation_name&.split("::")&.last || "—" %>
+          </td>
+          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.75rem; color: #999;">
+            <% if log.root? && log.root_reference_id.present? %>
+              <%= link_to "#{log.root_reference_id.split('-').first}…", operation_log_path(log),
+                          style: "color: #555; text-decoration: none;" %>
+            <% elsif log.root_reference_id %>
+              <%= log.root_reference_id.split("-").first %>…
+            <% else %>
+              —
+            <% end %>
+          </td>
+          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.75rem; color: #666; max-width: 160px; overflow: hidden;">
+            <% if log.respond_to?(:result_data) && log.result_data.present? %>
+              <% parsed = JSON.parse(log.result_data) rescue nil %>
+              <% if parsed %>
+                <%= parsed.map { |k, v| "#{k}: #{v.is_a?(Hash) ? "#{v['class']}##{v['id']}" : v.to_s.truncate(20)}" }.join(", ") %>
+              <% else %>
+                <%= log.result_data.truncate(30) %>
+              <% end %>
+            <% else %>
+              —
+            <% end %>
+          </td>
           <td style="padding: 0.5rem; color: #c00;"><%= log.error_message.presence || "—" %></td>
           <td style="padding: 0.5rem;"><%= log.performed_at.strftime("%Y-%m-%d %H:%M:%S") %></td>
         </tr>
       <% end %>
     </tbody>
   </table>
+
+  <p style="margin-top: 1rem; font-size: 0.8rem; color: #888;">
+    <strong>Tree</strong> — click the ID on a root operation to view the full execution call tree.
+    Rows sharing the same prefix belong to the same flow. <strong>↳ Parent</strong> shows which
+    operation triggered this step. <strong>Result</strong> shows <code>result_data</code> captured
+    by the <code>record_result</code> DSL.
+  </p>
 <% end %>

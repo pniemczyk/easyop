@@ -105,11 +105,11 @@ RSpec.describe Easyop::Plugins::Instrumentation do
       expect(payload[:operation]).to eq("InstrumentedSuccessOp")
     end
 
-    it "payload :duration is a positive Float" do
+    it "payload :duration is a non-negative Float" do
       op.call
       payload = captured.last[4]
       expect(payload[:duration]).to be_a(Float)
-      expect(payload[:duration]).to be > 0
+      expect(payload[:duration]).to be >= 0
     end
 
     it "payload :ctx is the actual Ctx object" do

@@ -33,6 +33,9 @@
         <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Operation</th>
         <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
         <th class="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Duration</th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Parent</th>
+        <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Tree</th>
+        <th class="w-8 px-4 py-3"></th>
         <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Time</th>
         <th class="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Error / Info</th>
       </tr>
@@ -55,7 +58,12 @@
             <% end %>
           </td>
           <td class="px-4 py-3">
-            <p class="text-sm font-mono font-medium text-gray-800"><%= log.operation_name.gsub("::", " :: ") %></p>
+            <p class="text-sm font-mono font-medium text-gray-800">
+              <% unless log.root? %>
+                <span class="text-gray-300 mr-1">↳</span>
+              <% end %>
+              <%= log.operation_name.gsub("::", " :: ") %>
+            </p>
           </td>
           <td class="px-4 py-3">
             <% if log.success? %>
@@ -70,6 +78,28 @@
           </td>
           <td class="px-4 py-3 text-xs text-gray-400 text-right font-mono whitespace-nowrap">
             <%= "%.2f" % log.duration_ms.to_f %>ms
+          </td>
+          <td class="px-4 py-3 text-xs text-gray-400 font-mono whitespace-nowrap">
+            <%= log.parent_operation_name&.split('::')&.last || '—' %>
+          </td>
+          <td class="px-4 py-3 text-xs text-gray-400 font-mono whitespace-nowrap">
+            <% if log.root_reference_id %>
+              <%= log.root_reference_id.split('-').first %>…
+            <% else %>
+              —
+            <% end %>
+          </td>
+          <td class="px-4 py-3 text-center" onclick="event.stopPropagation()">
+            <% if log.root? && log.root_reference_id.present? %>
+              <%= link_to admin_operation_log_path(log),
+                    title: "View execution tree",
+                    class: "text-indigo-400 hover:text-indigo-600" do %>
+                <svg style="width:1em;height:1em;display:inline-block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+                </svg>
+              <% end %>
+            <% end %>
           </td>
           <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
             <%= log.performed_at.strftime("%b %d %H:%M:%S") %>
@@ -87,7 +117,7 @@
 
         <% if has_details %>
           <tr id="<%= row_id %>" class="hidden border-t-0">
-            <td colspan="6" class="px-4 pb-4 pt-0">
+            <td colspan="9" class="px-4 pb-4 pt-0">
               <div class="ml-8 rounded-xl border border-gray-100 bg-gray-50 p-4 text-xs space-y-4">
 
                 <% if gateway %>

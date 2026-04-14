@@ -31,6 +31,8 @@
       <a href="plugins.html" class="active">All Plugins</a>
       <a href="plugins.html#instrumentation" style="padding-left:1.5rem;font-size:0.8rem">Instrumentation</a>
       <a href="plugins.html#recording" style="padding-left:1.5rem;font-size:0.8rem">Recording</a>
+      <a href="plugins.html#flow-tracing" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Flow Tracing</a>
+      <a href="plugins.html#result-data" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Result Data</a>
       <a href="plugins.html#async" style="padding-left:1.5rem;font-size:0.8rem">Async</a>
       <a href="plugins.html#transactional" style="padding-left:1.5rem;font-size:0.8rem">Transactional</a>
       <a href="plugins.html#events" style="padding-left:1.5rem;font-size:0.8rem">Events</a>
@@ -178,6 +180,7 @@ end</code></pre>
         <tbody>
           <tr><td><code>model:</code></td><td>required</td><td>ActiveRecord class to write records into</td></tr>
           <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Set <code>false</code> to skip params_data serialization</td></tr>
+          <tr><td><code>record_result:</code></td><td><code>nil</code></td><td>Plugin-level default for result capture (Hash/Proc/Symbol — see below)</td></tr>
         </tbody>
       </table>
 
@@ -191,8 +194,91 @@ end</code></pre>
   t.datetime :performed_at,   null: false
 end</code></pre>
 
+      <h3 id="flow-tracing">Flow Tracing (optional)</h3>
+      <p>Add four optional columns to reconstruct the full call tree when nested flows run. Missing columns are silently skipped — fully backward-compatible.</p>
+
+      <pre><code class="language-ruby"># Migration to add flow tracing to an existing table:
+add_column :operation_logs, :root_reference_id,     :string
+add_column :operation_logs, :reference_id,          :string
+add_column :operation_logs, :parent_operation_name, :string
+add_column :operation_logs, :parent_reference_id,   :string
+
+add_index :operation_logs, :root_reference_id
+add_index :operation_logs, :reference_id, unique: true
+add_index :operation_logs, :parent_reference_id</code></pre>
+
+      <table>
+        <thead>
+          <tr><th>Column</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>root_reference_id</code></td><td>UUID shared by every operation in one execution tree</td></tr>
+          <tr><td><code>reference_id</code></td><td>UUID unique to this specific operation execution</td></tr>
+          <tr><td><code>parent_operation_name</code></td><td>Class name of the direct calling operation</td></tr>
+          <tr><td><code>parent_reference_id</code></td><td><code>reference_id</code> of the direct calling operation</td></tr>
+        </tbody>
+      </table>
+
+      <p>A nested flow like <code>FullCheckout → AuthAndValidate → AuthenticateUser</code> produces one record per operation, all sharing the same <code>root_reference_id</code>, with <code>parent_*</code> fields linking each operation to its caller.</p>
+
+      <p><code>Easyop::Flow</code> automatically forwards the parent-tracing ctx to child steps. For the <strong>flow itself to appear in the tree</strong> as the root entry, inherit from your recorded base class and add <code>transactional false</code> (so step-level transactions are not shadowed by an outer one):</p>
+
+      <pre><code class="language-ruby">class ProcessCheckout &lt; ApplicationOperation
+  include Easyop::Flow
+  transactional false   # EasyOp handles soft rollback; each step owns its AR transaction
+
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+
+# Result in operation_logs:
+# ProcessCheckout  root=aaa  ref=bbb  parent=nil
+#   ValidateCart   root=aaa  ref=ccc  parent=ProcessCheckout/bbb
+#   ChargePayment  root=aaa  ref=ddd  parent=ProcessCheckout/bbb
+#   CreateOrder    root=aaa  ref=eee  parent=ProcessCheckout/bbb</code></pre>
+
+      <pre><code class="language-ruby"># Useful model scopes / methods:
+scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+def root?; parent_reference_id.nil?; end
+
+# Fetch all logs for a given execution tree:
+root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference_id: nil)
+OperationLog.for_tree(root_log.root_reference_id)</code></pre>
+
+      <h3 id="result-data">Result Data (optional)</h3>
+      <p>Add an optional <code>result_data :text</code> column to capture selected ctx output after the operation runs. Use the <code>record_result</code> DSL — three forms supported.</p>
+
+      <pre><code class="language-ruby"># Migration:
+add_column :operation_logs, :result_data, :text  # stored as JSON
+
+# Attrs form — one or more ctx keys:
+class PlaceOrder &lt; ApplicationOperation
+  record_result attrs: :order_id
+end
+
+class ProcessPayment &lt; ApplicationOperation
+  record_result attrs: [:charge_id, :amount_cents]
+end
+
+# Block form — custom extraction:
+class GenerateReport &lt; ApplicationOperation
+  record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
+end
+
+# Symbol form — delegates to a private instance method:
+class BuildInvoice &lt; ApplicationOperation
+  record_result :build_result
+  private
+  def build_result = { invoice_id: ctx.invoice.id, total: ctx.total }
+end
+
+# Plugin-level default — inherited by all subclasses, overridable per class:
+plugin Easyop::Plugins::Recording, model: OperationLog,
+       record_result: { attrs: :metadata }</code></pre>
+
+      <p>Class-level <code>record_result</code> overrides the plugin-level default. Missing ctx keys produce <code>nil</code> — no error. ActiveRecord objects → <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>. Serialization errors are swallowed. The <code>result_data</code> column is silently skipped when absent from the model table — fully backward-compatible.</p>
+
       <h3>Scrubbed keys</h3>
-      <p>These keys are never written to <code>params_data</code>: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code>.</p>
+      <p>These keys are never written to <code>params_data</code>: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code>. Internal tracing keys (<code>__recording_*</code>) are also excluded.</p>
       <p>ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code> rather than their full representation.</p>
 
       <h3>Opting out</h3>

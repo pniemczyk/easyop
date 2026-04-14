@@ -5,8 +5,9 @@ module Flows
   #   - Lambda guard in flow: -> (ctx) { ... } guards Newsletter::Subscribe
   #     (only runs if user opted in — first layer of protection)
   #   - Newsletter::Subscribe also has skip_if for double-guard safety
-  class RegisterAndSubscribe
+  class RegisterAndSubscribe < ApplicationOperation
     include Easyop::Flow
+    transactional false
 
     flow Users::Register,
          # Lambda guard — Newsletter::Subscribe only runs if newsletter_opt_in is truthy

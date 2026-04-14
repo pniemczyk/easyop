@@ -73,6 +73,7 @@ end
 |---|---|---|
 | `model:` | required | ActiveRecord class |
 | `record_params:` | `true` | Set `false` to skip params serialization |
+| `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol) |
 
 **Required migration:**
 ```ruby
@@ -86,8 +87,63 @@ create_table :operation_logs do |t|
 end
 ```
 
+**Optional flow-tracing columns** — add these to reconstruct the full call tree:
+```ruby
+add_column :operation_logs, :root_reference_id,     :string
+add_column :operation_logs, :reference_id,          :string
+add_column :operation_logs, :parent_operation_name, :string
+add_column :operation_logs, :parent_reference_id,   :string
+
+add_index :operation_logs, :root_reference_id
+add_index :operation_logs, :reference_id, unique: true
+add_index :operation_logs, :parent_reference_id
+```
+
+When present, all operations in one execution tree share the same `root_reference_id`. Parent/child relationships are captured via `parent_operation_name` and `parent_reference_id`. Missing columns are silently skipped (backward-compatible).
+
+`Easyop::Flow` automatically forwards these ctx keys to child steps. For the flow itself to appear in the tree as the root entry, inherit from your recorded base class and add `transactional false`:
+
+```ruby
+class ProcessCheckout < ApplicationOperation
+  include Easyop::Flow
+  transactional false  # steps manage their own transactions
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+```
+
+| Column | Purpose |
+|--------|---------|
+| `root_reference_id` | UUID shared by every operation in one execution tree |
+| `reference_id` | UUID unique to this operation execution |
+| `parent_operation_name` | Class name of the direct calling operation |
+| `parent_reference_id` | `reference_id` of the direct calling operation |
+
+**`record_result` DSL** — persist selected ctx output to an optional `result_data :text` column (JSON):
+
+```ruby
+add_column :operation_logs, :result_data, :text
+
+# Attrs form:
+record_result attrs: :order_id
+record_result attrs: [:charge_id, :amount_cents]
+
+# Block form:
+record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
+
+# Symbol form (private instance method):
+record_result :build_result
+
+# Plugin-level default (inherited by all subclasses):
+plugin Easyop::Plugins::Recording, model: OperationLog,
+       record_result: { attrs: :metadata }
+```
+
+Class-level `record_result` overrides the plugin default. Missing ctx keys → `nil`. AR objects → `{ "id" => 42, "class" => "User" }`. Serialization errors are swallowed. Column silently skipped when absent (backward-compatible).
+
 **Scrubbed keys** (never appear in `params_data`):
 `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+
+Internal tracing keys (`__recording_*`) are also excluded from `params_data`.
 
 AR objects in ctx are serialized as `{ "id" => 42, "class" => "User" }`.
 
@@ -161,7 +217,7 @@ end
 
 **Scope:** The transaction wraps the entire `prepare` chain — before hooks, call, and after hooks all run inside the same transaction. On `ctx.fail!`, the `Ctx::Failure` exception causes the transaction to roll back.
 
-**With Flow:** Applied per-step (each step gets its own transaction). For a flow-wide transaction, apply it to the Flow class itself.
+**With Flow:** Applied per-step (each step gets its own transaction). For a flow-wide transaction you could apply it to the Flow class itself, but when using Recording's flow tracing the recommended pattern is `transactional false` on the flow (steps own their transactions, EasyOp handles soft rollback).
 
 ## Plugin: Events (producer)
 

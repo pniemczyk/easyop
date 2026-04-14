@@ -1,3 +1,5 @@
+require 'securerandom'
+
 module Easyop
   # Compose a sequence of operations that share a single ctx.
   #
@@ -9,6 +11,27 @@ module Easyop
   #     include Easyop::Flow
   #
   #     flow ValidateCart, ChargeCard, CreateOrder, NotifyUser
+  #   end
+  #
+  # ## Recording plugin integration (flow tracing)
+  #
+  # When steps have the Recording plugin installed, `CallBehavior#call` forwards
+  # the parent ctx keys so every step log entry shows the flow as its parent:
+  #
+  #   # Bare flow — flow itself is not recorded but steps see it as parent:
+  #   class ProcessOrder
+  #     include Easyop::Flow
+  #     flow ValidateCart, ChargeCard
+  #   end
+  #
+  # For full tree reconstruction (flow appears in operation_logs as the root
+  # entry) inherit from your recorded base class and opt out of the transaction
+  # so step-level transactions are not shadowed by an outer one:
+  #
+  #   class ProcessOrder < ApplicationOperation
+  #     include Easyop::Flow
+  #     transactional false   # EasyOp handles rollback; steps own their transactions
+  #     flow ValidateCart, ChargeCard
   #   end
   #
   #   result = ProcessOrder.call(user: user, cart: cart)
@@ -31,6 +54,25 @@ module Easyop
     # otherwise place Operation earlier in the ancestor chain than Flow itself).
     module CallBehavior
       def call
+        # ── Flow-tracing forwarding for the Recording plugin ──────────────────
+        # When Recording is NOT installed on this flow class (i.e. the flow does
+        # not inherit from a base operation that has Recording), set the
+        # __recording_parent_* ctx keys manually so every step operation knows
+        # this flow is its parent.  When Recording IS installed on the flow (its
+        # RunWrapper runs before `call` is reached), it has already set up the
+        # parent context correctly — we detect that via _recording_enabled? and
+        # skip to avoid a conflict.  If Recording is not used at all, these ctx
+        # keys are unused and ignored.
+        _flow_tracing = self.class.name &&
+                        !self.class.respond_to?(:_recording_enabled?)
+        if _flow_tracing
+          ctx[:__recording_root_reference_id]     ||= SecureRandom.uuid
+          _prev_parent_name                         = ctx[:__recording_parent_operation_name]
+          _prev_parent_id                           = ctx[:__recording_parent_reference_id]
+          ctx[:__recording_parent_operation_name]   = self.class.name
+          ctx[:__recording_parent_reference_id]     = SecureRandom.uuid
+        end
+
         pending_guard = nil
 
         self.class._flow_steps.each do |step|
@@ -56,6 +98,12 @@ module Easyop
       rescue Ctx::Failure
         ctx.rollback!
         raise
+      ensure
+        # Restore parent context so any caller above this flow sees the right parent.
+        if _flow_tracing
+          ctx[:__recording_parent_operation_name] = _prev_parent_name
+          ctx[:__recording_parent_reference_id]   = _prev_parent_id
+        end
       end
     end
 

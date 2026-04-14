@@ -161,7 +161,7 @@ module Easyop
       if Easyop.config.strict_types
         ctx.fail!(error: msg, errors: ctx.errors.merge(field.name => msg))
       else
-        warn "[Easyop] #{msg}"
+        $stderr.puts "[Easyop] #{msg}"
       end
     end
   end

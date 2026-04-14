@@ -428,6 +428,39 @@ class FullCheckout
 end
 ```
 
+### Recording plugin integration — full call-tree tracing
+
+When step operations have the Recording plugin installed, `Easyop::Flow` automatically forwards the parent-tracing ctx so every step's log entry shows the flow as its `parent_operation_name`. All steps and the flow share the same `root_reference_id`.
+
+**Bare flow** (Recording only on steps — flow is NOT recorded itself, but steps carry correct parent info):
+
+```ruby
+class ProcessCheckout
+  include Easyop::Flow
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+```
+
+**Recommended** — inherit from your recorded base class so the **flow itself appears in operation_logs** as the tree root. Add `transactional false` so step-level transactions aren't shadowed by an outer one:
+
+```ruby
+class ProcessCheckout < ApplicationOperation
+  include Easyop::Flow
+  transactional false   # EasyOp handles rollback; each step owns its transaction
+
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+```
+
+Result in `operation_logs`:
+
+```
+ProcessCheckout    root=aaa  ref=bbb  parent=nil
+  ValidateCart     root=aaa  ref=ccc  parent=ProcessCheckout/bbb
+  ChargePayment    root=aaa  ref=ddd  parent=ProcessCheckout/bbb
+  CreateOrder      root=aaa  ref=eee  parent=ProcessCheckout/bbb
+```
+
 ---
 
 ## `prepare` — Pre-registered Callbacks
@@ -613,6 +646,7 @@ end
 |---|---|---|
 | `model:` | required | ActiveRecord class to write logs into |
 | `record_params:` | `true` | Set `false` to skip serializing ctx params |
+| `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol — see below) |
 
 **Required model columns:**
 
@@ -627,7 +661,90 @@ create_table :operation_logs do |t|
 end
 ```
 
+**Optional flow-tracing columns:**
+
+Add these columns to reconstruct the full call tree when nested flows run. They are populated automatically when present — missing columns are silently skipped (backward-compatible):
+
+```ruby
+add_column :operation_logs, :root_reference_id,     :string
+add_column :operation_logs, :reference_id,          :string
+add_column :operation_logs, :parent_operation_name, :string
+add_column :operation_logs, :parent_reference_id,   :string
+
+add_index :operation_logs, :root_reference_id
+add_index :operation_logs, :reference_id, unique: true
+add_index :operation_logs, :parent_reference_id
+```
+
+All operations triggered by a single top-level call share the same `root_reference_id`. The `parent_operation_name` and `parent_reference_id` columns link each operation to its direct caller. `Easyop::Flow` automatically forwards these ctx keys to child steps — see the [Flow section](#flow--composing-operations) for how to make the flow itself appear as the tree root. Example (flow with nested steps):
+
+```
+FullCheckout      root=aaa  ref=bbb  parent=nil
+  AuthAndValidate root=aaa  ref=ccc  parent=FullCheckout/bbb
+    AuthUser      root=aaa  ref=ddd  parent=AuthAndValidate/ccc
+  ProcessPayment  root=aaa  ref=eee  parent=FullCheckout/bbb
+```
+
+Useful model helpers:
+
+```ruby
+scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+def root?; parent_reference_id.nil?; end
+
+# Fetch the entire execution tree for one top-level call:
+root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference_id: nil)
+OperationLog.for_tree(root_log.root_reference_id)
+```
+
 The plugin automatically scrubs these keys from `params_data` before persisting: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`. ActiveRecord objects are serialized as `{ id:, class: }` rather than their full representation.
+
+**`record_result` DSL — capture output data:**
+
+Add an optional `result_data :text` column to persist selected ctx values after the operation runs:
+
+```ruby
+add_column :operation_logs, :result_data, :text  # stored as JSON
+```
+
+Then declare what to record using the `record_result` DSL (three forms):
+
+```ruby
+# Attrs form — one or more ctx keys
+class PlaceOrder < ApplicationOperation
+  record_result attrs: :order_id
+end
+
+class ProcessPayment < ApplicationOperation
+  record_result attrs: [:charge_id, :amount_cents]
+end
+
+# Block form — custom extraction
+class GenerateReport < ApplicationOperation
+  record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
+end
+
+# Symbol form — delegates to a private instance method
+class BuildInvoice < ApplicationOperation
+  record_result :build_result
+
+  private
+
+  def build_result
+    { invoice_id: ctx.invoice.id, total: ctx.total }
+  end
+end
+```
+
+Set a plugin-level default inherited by all subclasses:
+
+```ruby
+plugin Easyop::Plugins::Recording, model: OperationLog,
+       record_result: { attrs: :metadata }
+# or: record_result: ->(ctx) { { id: ctx.record_id } }
+# or: record_result: :build_result
+```
+
+Class-level `record_result` overrides the plugin-level default. Missing ctx keys produce `nil` — no error. The `result_data` column is silently skipped when absent from the model table — fully backward-compatible.
 
 **Opt out per class:**
 

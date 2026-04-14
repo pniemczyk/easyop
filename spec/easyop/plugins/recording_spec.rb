@@ -410,4 +410,493 @@ RSpec.describe Easyop::Plugins::Recording do
       expect(fake_logger).to have_received(:warn).with(/EasyOp::Recording/)
     end
   end
+
+  # ── flow tracing ──────────────────────────────────────────────────────────────
+
+  TRACING_COLUMNS = %w[
+    operation_name success error_message params_data duration_ms performed_at
+    root_reference_id reference_id parent_operation_name parent_reference_id
+  ].freeze
+
+  def tracing_model
+    fake_model(columns: TRACING_COLUMNS)
+  end
+
+  describe "flow tracing — standalone operation" do
+    let(:model) { tracing_model }
+
+    before do
+      m = model
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("TracingStandaloneOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+      end
+      op.call(name: "Alice")
+    end
+
+    let(:record) { model.records.first }
+
+    it "generates a root_reference_id" do
+      expect(record[:root_reference_id]).to be_a(String).and match(/\A[0-9a-f-]{36}\z/)
+    end
+
+    it "generates a reference_id distinct from root_reference_id" do
+      expect(record[:reference_id]).to be_a(String).and match(/\A[0-9a-f-]{36}\z/)
+    end
+
+    it "has nil parent_operation_name" do
+      expect(record[:parent_operation_name]).to be_nil
+    end
+
+    it "has nil parent_reference_id" do
+      expect(record[:parent_reference_id]).to be_nil
+    end
+  end
+
+  describe "flow tracing — simple flow with two steps" do
+    let(:model) { tracing_model }
+
+    before do
+      require "easyop/flow"
+      m = model
+
+      step_a = make_op { def call; end }.tap do |k|
+        stub_const("TracingFlowStepA", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      step_b = make_op { def call; end }.tap do |k|
+        stub_const("TracingFlowStepB", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      flow = Class.new do
+        include Easyop::Flow
+        flow step_a, step_b
+      end.tap do |k|
+        stub_const("TracingSimpleFlow", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      flow.call
+    end
+
+    let(:flow_record)   { model.records.find { |r| r[:operation_name] == "TracingSimpleFlow" } }
+    let(:step_a_record) { model.records.find { |r| r[:operation_name] == "TracingFlowStepA" } }
+    let(:step_b_record) { model.records.find { |r| r[:operation_name] == "TracingFlowStepB" } }
+
+    it "records all three executions" do
+      expect(model.records.length).to eq(3)
+    end
+
+    it "all records share the same root_reference_id" do
+      ids = model.records.map { |r| r[:root_reference_id] }.uniq
+      expect(ids.length).to eq(1)
+      expect(ids.first).not_to be_nil
+    end
+
+    it "flow has nil parent fields (it is the root)" do
+      expect(flow_record[:parent_operation_name]).to be_nil
+      expect(flow_record[:parent_reference_id]).to be_nil
+    end
+
+    it "step A has the flow as its parent" do
+      expect(step_a_record[:parent_operation_name]).to eq("TracingSimpleFlow")
+      expect(step_a_record[:parent_reference_id]).to eq(flow_record[:reference_id])
+    end
+
+    it "step B has the flow as its parent (not step A)" do
+      expect(step_b_record[:parent_operation_name]).to eq("TracingSimpleFlow")
+      expect(step_b_record[:parent_reference_id]).to eq(flow_record[:reference_id])
+    end
+
+    it "each record has a distinct reference_id" do
+      ids = model.records.map { |r| r[:reference_id] }
+      expect(ids.uniq.length).to eq(3)
+    end
+  end
+
+  describe "flow tracing — nested flows (3 levels)" do
+    let(:model) { tracing_model }
+
+    before do
+      require "easyop/flow"
+      m = model
+
+      leaf = make_op { def call; end }.tap do |k|
+        stub_const("TracingLeafOp", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      inner = Class.new do
+        include Easyop::Flow
+        flow leaf
+      end.tap do |k|
+        stub_const("TracingInnerFlow", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      outer = Class.new do
+        include Easyop::Flow
+        flow inner
+      end.tap do |k|
+        stub_const("TracingOuterFlow", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      outer.call
+    end
+
+    let(:outer_record) { model.records.find { |r| r[:operation_name] == "TracingOuterFlow" } }
+    let(:inner_record) { model.records.find { |r| r[:operation_name] == "TracingInnerFlow" } }
+    let(:leaf_record)  { model.records.find { |r| r[:operation_name] == "TracingLeafOp" } }
+
+    it "all three share the same root_reference_id" do
+      ids = model.records.map { |r| r[:root_reference_id] }.uniq
+      expect(ids.length).to eq(1)
+      expect(ids.first).not_to be_nil
+    end
+
+    it "outer has no parent" do
+      expect(outer_record[:parent_operation_name]).to be_nil
+      expect(outer_record[:parent_reference_id]).to be_nil
+    end
+
+    it "inner's parent is outer" do
+      expect(inner_record[:parent_operation_name]).to eq("TracingOuterFlow")
+      expect(inner_record[:parent_reference_id]).to eq(outer_record[:reference_id])
+    end
+
+    it "leaf's parent is inner" do
+      expect(leaf_record[:parent_operation_name]).to eq("TracingInnerFlow")
+      expect(leaf_record[:parent_reference_id]).to eq(inner_record[:reference_id])
+    end
+  end
+
+  describe "flow tracing — parent has recording false" do
+    let(:model) { tracing_model }
+
+    before do
+      require "easyop/flow"
+      m = model
+
+      child = make_op { def call; end }.tap do |k|
+        stub_const("TracingChildEnabled", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      parent_flow = Class.new do
+        include Easyop::Flow
+        flow child
+      end.tap do |k|
+        stub_const("TracingParentDisabled", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+        k.recording false
+      end
+
+      parent_flow.call
+    end
+
+    let(:record) { model.records.first }
+
+    it "only the child is recorded" do
+      expect(model.records.length).to eq(1)
+      expect(record[:operation_name]).to eq("TracingChildEnabled")
+    end
+
+    it "child acts as its own root (parent skipped tracing setup)" do
+      expect(record[:root_reference_id]).not_to be_nil
+      expect(record[:parent_operation_name]).to be_nil
+      expect(record[:parent_reference_id]).to be_nil
+    end
+  end
+
+  describe "flow tracing — internal ctx keys excluded from params_data" do
+    let(:model) { tracing_model }
+
+    it "does not leak __recording_* keys into params_data JSON" do
+      m  = model
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("TracingParamsOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+      end
+      op.call(name: "test")
+
+      data = JSON.parse(model.records.first[:params_data])
+      expect(data.keys).to all(satisfy { |k| !k.start_with?("__recording_") })
+    end
+  end
+
+  describe "flow tracing — bare Flow class (Recording not installed on the flow)" do
+    # When include Easyop::Flow is used without inheriting from a recorded base
+    # class, CallBehavior#call now forwards the parent tracing ctx so steps still
+    # see the flow as their parent.  The flow itself is NOT written to the model
+    # (Recording is not installed on it), but steps carry the correct parent info.
+    let(:model) { tracing_model }
+
+    before do
+      require "easyop/flow"
+      m = model
+
+      step_a = make_op { def call; end }.tap do |k|
+        stub_const("BareFlowStepA", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      step_b = make_op { def call; end }.tap do |k|
+        stub_const("BareFlowStepB", k)
+        k.plugin(Easyop::Plugins::Recording, model: m)
+      end
+
+      # Bare Flow — no plugin Recording installed on it
+      bare_flow = Class.new do
+        include Easyop::Flow
+        flow step_a, step_b
+      end
+      stub_const("BareFlowClass", bare_flow)
+
+      bare_flow.call
+    end
+
+    it "records only the step operations (not the flow itself)" do
+      expect(model.records.length).to eq(2)
+      expect(model.records.map { |r| r[:operation_name] }).to contain_exactly(
+        "BareFlowStepA", "BareFlowStepB"
+      )
+    end
+
+    it "all step records share the same root_reference_id" do
+      ids = model.records.map { |r| r[:root_reference_id] }.uniq
+      expect(ids.length).to eq(1)
+      expect(ids.first).to be_a(String).and match(/\A[0-9a-f-]{36}\z/)
+    end
+
+    it "step A carries the bare flow as parent_operation_name" do
+      rec = model.records.find { |r| r[:operation_name] == "BareFlowStepA" }
+      expect(rec[:parent_operation_name]).to eq("BareFlowClass")
+    end
+
+    it "step B carries the bare flow as parent_operation_name" do
+      rec = model.records.find { |r| r[:operation_name] == "BareFlowStepB" }
+      expect(rec[:parent_operation_name]).to eq("BareFlowClass")
+    end
+
+    it "both steps share the same parent_reference_id (flow's synthetic uuid)" do
+      parent_ids = model.records.map { |r| r[:parent_reference_id] }.uniq
+      expect(parent_ids.length).to eq(1)
+      expect(parent_ids.first).to be_a(String).and match(/\A[0-9a-f-]{36}\z/)
+    end
+
+    it "both steps are siblings (distinct reference_ids)" do
+      ids = model.records.map { |r| r[:reference_id] }
+      expect(ids.uniq.length).to eq(2)
+    end
+  end
+
+  describe "flow tracing — column filtering still works" do
+    it "silently drops tracing columns when model lacks them" do
+      m  = fake_model(columns: %w[operation_name success])
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("TracingSlimModelOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+      end
+      op.call
+      expect(m.records.first.keys.map(&:to_s).sort).to eq(%w[operation_name success])
+    end
+  end
+
+  # ── record_result ─────────────────────────────────────────────────────────────
+
+  ALL_COLUMNS = (TRACING_COLUMNS + %w[result_data]).freeze
+
+  def result_model
+    fake_model(columns: ALL_COLUMNS)
+  end
+
+  describe "record_result — attrs form (single key)" do
+    it "persists the specified ctx key as JSON in result_data" do
+      m = result_model
+      op = make_op { def call; ctx.info = "hello"; end }.tap do |klass|
+        stub_const("RecordResultAttrsOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: :info
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("info" => "hello")
+    end
+  end
+
+  describe "record_result — attrs form (multiple keys)" do
+    it "persists all specified ctx keys as JSON" do
+      m = result_model
+      op = make_op { def call; ctx.info = "a"; ctx.status = "b"; end }.tap do |klass|
+        stub_const("RecordResultMultiOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: [:info, :status]
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("info" => "a", "status" => "b")
+    end
+  end
+
+  describe "record_result — block form" do
+    it "calls the block with ctx and persists the returned hash" do
+      m = result_model
+      op = make_op { def call; ctx.total = 42; end }.tap do |klass|
+        stub_const("RecordResultBlockOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result { |c| { computed: c.total * 2 } }
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("computed" => 84)
+    end
+  end
+
+  describe "record_result — symbol form (private instance method)" do
+    it "calls the named method on the operation instance" do
+      m = result_model
+      op = make_op do
+        def call
+          ctx.info = "from method"
+        end
+
+        private
+
+        def build_result
+          { info: ctx.info }
+        end
+      end.tap do |klass|
+        stub_const("RecordResultSymbolOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result :build_result
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("info" => "from method")
+    end
+  end
+
+  describe "record_result — plugin-level default via install" do
+    it "persists result_data when configured at the plugin level" do
+      m = result_model
+      op = make_op { def call; ctx.metadata = "meta-value"; end }.tap do |klass|
+        stub_const("RecordResultPluginLevelOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m, record_result: { attrs: :metadata })
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("metadata" => "meta-value")
+    end
+  end
+
+  describe "record_result — class-level overrides plugin-level default" do
+    it "uses the class-level config instead of the plugin-level one" do
+      m = result_model
+      op = make_op { def call; ctx.info = "class"; ctx.metadata = "plugin"; end }.tap do |klass|
+        stub_const("RecordResultOverrideOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m, record_result: { attrs: :metadata })
+        klass.record_result attrs: :info
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("info" => "class")
+      expect(data).not_to have_key("metadata")
+    end
+  end
+
+  describe "record_result — missing ctx key" do
+    it "stores nil for a key that was never set in ctx" do
+      m = result_model
+      op = make_op { def call; end }.tap do |klass|
+        stub_const("RecordResultMissingKeyOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: :nonexistent
+      end
+      op.call
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data).to eq("nonexistent" => nil)
+    end
+  end
+
+  describe "record_result — not configured" do
+    it "does not add result_data key to the record" do
+      m = result_model
+      op = make_op { def call; ctx.info = "x"; end }.tap do |klass|
+        stub_const("RecordResultNoneOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        # No record_result configured
+      end
+      op.call
+      expect(m.records.first.key?(:result_data)).to be false
+    end
+  end
+
+  describe "record_result — model lacks result_data column" do
+    it "silently skips result_data when the column is absent" do
+      m = fake_model  # default columns — no result_data
+      op = make_op { def call; ctx.info = "x"; end }.tap do |klass|
+        stub_const("RecordResultNoColOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: :info
+      end
+      expect { op.call }.not_to raise_error
+      expect(m.records.first.key?(:result_data)).to be false
+    end
+  end
+
+  describe "record_result — AR objects in result serialized as {id:, class:}" do
+    it "serializes ActiveRecord objects the same way as params_data" do
+      fake_ar_class = Class.new(ActiveRecord::Base) do
+        def self.name; "FakeProduct"; end
+        attr_reader :id
+        def initialize(id); @id = id; end
+      end
+      product = fake_ar_class.new(7)
+
+      m = result_model
+      op = make_op { def call; ctx.product = ctx[:_product_ref]; end }.tap do |klass|
+        stub_const("RecordResultArOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: :product
+      end
+      op.call(_product_ref: product)
+      data = JSON.parse(m.records.first[:result_data])
+      expect(data["product"]).to eq("id" => 7, "class" => "FakeProduct")
+    end
+  end
+
+  describe "record_result — serialization error is swallowed" do
+    it "stores nil and the operation still succeeds when the block raises" do
+      m = result_model
+      op = make_op { def call; ctx.info = "ok"; end }.tap do |klass|
+        stub_const("RecordResultRaiseOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result { |_c| raise "boom" }
+      end
+      result = op.call
+      expect(result.success?).to be true
+      expect(m.records.first[:result_data]).to be_nil
+    end
+  end
+
+  describe "record_result — child inherits parent's config" do
+    it "records result_data on a subclass that does not re-declare record_result" do
+      m = result_model
+      parent = make_op { def call; ctx.info = "inherited"; end }.tap do |klass|
+        stub_const("RecordResultParentOp", klass)
+        klass.plugin(Easyop::Plugins::Recording, model: m)
+        klass.record_result attrs: :info
+      end
+      child = Class.new(parent) do
+        def call; ctx.info = "child-value"; end
+      end
+      stub_const("RecordResultChildOp", child)
+      child.call
+      data = JSON.parse(m.records.last[:result_data])
+      expect(data).to eq("info" => "child-value")
+    end
+  end
 end

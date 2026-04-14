@@ -22,6 +22,10 @@ module Articles
       ctx.fail!(error: "Could not save article", errors: e.record.errors.to_h)
     end
 
+    # Persist the created article to result_data after the operation runs.
+    # Requires the optional result_data :text column in operation_logs.
+    record_result attrs: :article
+
     def call
       ctx.article = Article.create!(
         title:        ctx.title,

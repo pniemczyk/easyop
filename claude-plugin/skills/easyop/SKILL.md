@@ -310,6 +310,8 @@ Fires `"easyop.operation.call"` via `ActiveSupport::Notifications`.
 ### Recording
 Persists each execution to an AR model. `recording false` to opt out.
 Required columns: `operation_name`, `success`, `error_message`, `params_data`, `duration_ms`, `performed_at`.
+Optional flow-tracing columns: `root_reference_id`, `reference_id`, `parent_operation_name`, `parent_reference_id` — add these to reconstruct the full call tree. All operations in one execution share the same `root_reference_id`; parent/child links are captured via `parent_*` fields. Missing columns are silently skipped (backward-compatible). `Easyop::Flow` automatically forwards parent-tracing ctx to child steps — for the flow to appear in logs as the tree root, inherit from your recorded base class and add `transactional false`.
+Optional `result_data :text` column — use the `record_result` DSL to selectively persist ctx output (attrs form, block form, or symbol/method form). Plugin-level default via `record_result:` install option; class-level DSL overrides it. Backward-compatible — column silently skipped when absent.
 
 ### Async
 Adds `.call_async(attrs, wait:, wait_until:, queue:)`. Serializes AR objects by ID.

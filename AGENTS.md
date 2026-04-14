@@ -85,6 +85,12 @@ spec/
     plugins/
       events_spec.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
       event_handlers_spec.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
+      recording_spec.rb            # Recording plugin: persist, scrub, opt-out, flow tracing, record_result DSL
+
+test/
+  easyop/
+    plugins/
+      recording_test.rb            # Minitest mirror of recording_spec.rb
 
 examples/
   usage.rb                         # 16 runnable examples (ruby -Ilib examples/usage.rb)
@@ -241,7 +247,7 @@ always win over parent class handlers for the same exception class.
 | `Easyop::Schema` | `params`/`result` DSL; type validation before/after `call` |
 | `Easyop::Operation` | Composes all modules; `call` / `call!` class methods; `_easyop_run` |
 | `Easyop::FlowBuilder` | Accumulates `on_success`/`on_failure` callbacks; `bind_with`/`on`; `call` |
-| `Easyop::Flow` | `flow` DSL; sequential step execution via `call!`; rollback on failure |
+| `Easyop::Flow` | `flow` DSL; sequential step execution via `call!`; rollback on failure; automatically forwards `__recording_parent_*` ctx to steps for Recording plugin tree tracing |
 | `Easyop::Events::Event` | Immutable frozen domain event value object |
 | `Easyop::Events::Bus::Base` | Abstract adapter interface: `publish`, `subscribe`, `unsubscribe`; glob→regex helpers |
 | `Easyop::Events::Bus::Adapter` | Inheritable base for custom buses; adds `_safe_invoke` + `_compile_pattern` (cached) |
@@ -251,6 +257,7 @@ always win over parent class handlers for the same exception class.
 | `Easyop::Events::Registry` | Global bus holder + thread-safe handler subscription registry |
 | `Easyop::Plugins::Events` | Producer plugin: `emits` DSL; RunWrapper fires events in `ensure` |
 | `Easyop::Plugins::EventHandlers` | Subscriber plugin: `on` DSL; registers at class-load time |
+| `Easyop::Plugins::Recording` | Persists executions to AR model; flow tracing via `root_reference_id`/`reference_id`/`parent_*` columns (optional); `record_result` DSL for `result_data` output capture (optional) — all backward-compatible |
 
 ---
 

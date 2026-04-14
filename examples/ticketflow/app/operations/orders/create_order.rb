@@ -8,6 +8,10 @@ module Orders
       required :subtotal_cents, Integer
     end
 
+    # Persist the created order's id and total to result_data after the operation runs.
+    # Requires the optional result_data :text column in operation_logs.
+    record_result attrs: %i[order total_cents]
+
     def call
       discount_cents = ctx[:discount_cents].to_i
       total_cents = [ ctx.subtotal_cents - discount_cents, 0 ].max

@@ -6,8 +6,9 @@
 # Also demonstrates:
 #   - rollback: if any step fails after user creation, CreateWelcomeDraft rolls back
 #   - lambda guard: Newsletter::Subscribe only runs when newsletter_opt_in is true
-class Flows::CompleteRegistration
+class Flows::CompleteRegistration < ApplicationOperation
   include Easyop::Flow
+  transactional false
 
   # Nested operation defined before `flow` so it can be referenced in the step list.
   class CreateWelcomeDraft < ApplicationOperation

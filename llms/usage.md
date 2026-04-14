@@ -418,7 +418,7 @@ class Newsletter::SendBroadcast < ApplicationOperation
 end
 ```
 
-Migration:
+Migration (minimum):
 ```ruby
 create_table :operation_logs do |t|
   t.string   :operation_name, null: false
@@ -426,9 +426,95 @@ create_table :operation_logs do |t|
   t.string   :error_message
   t.text     :params_data
   t.float    :duration_ms
-  t.datetime :performed_at, null: false
+  t.datetime :performed_at,   null: false
 end
 ```
+
+Add these optional columns to enable **flow tracing** (call-tree reconstruction):
+```ruby
+# Add to existing table via a migration:
+add_column :operation_logs, :root_reference_id,     :string
+add_column :operation_logs, :reference_id,          :string
+add_column :operation_logs, :parent_operation_name, :string
+add_column :operation_logs, :parent_reference_id,   :string
+
+add_index :operation_logs, :root_reference_id
+add_index :operation_logs, :reference_id, unique: true
+add_index :operation_logs, :parent_reference_id
+```
+
+When these columns exist, every recorded operation gets UUIDs and parent pointers.
+All operations in a single flow execution share the same `root_reference_id`:
+
+```ruby
+# Fetch all logs from the same execution tree (add this scope to your model):
+scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+
+# Check if an operation is the root (no parent):
+def root?
+  parent_reference_id.nil?
+end
+
+# Usage:
+root_log = OperationLog.where(root_reference_id: nil).last  # top-level calls
+OperationLog.for_tree(root_log.root_reference_id)           # entire tree
+```
+
+**`record_result` DSL** — persist selected ctx output into an optional `result_data :text` column:
+
+```ruby
+add_column :operation_logs, :result_data, :text  # stored as JSON
+
+# Attrs form (one or multiple ctx keys):
+class PlaceOrder < ApplicationOperation
+  record_result attrs: :order_id
+end
+
+class ProcessPayment < ApplicationOperation
+  record_result attrs: [:charge_id, :amount_cents]
+end
+
+# Block form (custom extraction):
+class GenerateReport < ApplicationOperation
+  record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
+end
+
+# Symbol form (private instance method):
+class BuildInvoice < ApplicationOperation
+  record_result :build_result
+  private
+  def build_result = { invoice_id: ctx.invoice.id, total: ctx.total }
+end
+
+# Plugin-level default — inherited by all subclasses, overridable per class:
+plugin Easyop::Plugins::Recording, model: OperationLog,
+       record_result: { attrs: :metadata }
+```
+
+Missing ctx keys produce `nil` (no error). AR objects → `{ id:, class: }`. The `result_data` column is silently skipped when absent — backward-compatible.
+
+**Flow + Recording: full call-tree tracing**
+
+`Easyop::Flow`'s `CallBehavior#call` automatically forwards recording parent ctx to steps. For the flow itself to appear in `operation_logs` as the tree root, inherit from your recorded base class and opt out of Transactional (so steps' own transactions are not shadowed):
+
+```ruby
+class ProcessCheckout < ApplicationOperation
+  include Easyop::Flow
+  transactional false   # EasyOp handles rollback; each step owns its AR transaction
+
+  flow ValidateCart, ChargePayment, CreateOrder
+end
+```
+
+Result in `operation_logs` (with flow-tracing columns):
+```
+ProcessCheckout  root=aaa  ref=bbb  parent=nil
+  ValidateCart   root=aaa  ref=ccc  parent=ProcessCheckout/bbb
+  ChargePayment  root=aaa  ref=ddd  parent=ProcessCheckout/bbb
+  CreateOrder    root=aaa  ref=eee  parent=ProcessCheckout/bbb
+```
+
+Bare `include Easyop::Flow` (without inheriting from a recorded base) still works — steps carry the correct `parent_operation_name` — but the flow itself won't have a row in `operation_logs`.
 
 ## 21. Async plugin
 

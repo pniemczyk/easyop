@@ -9,7 +9,7 @@ Rails.application.routes.draw do
   resource  :session,      only: [:new, :create, :destroy]
   resource  :registration, only: [:new, :create]
   resources :subscriptions,    only: [:new, :create, :destroy]
-  resources :operation_logs,   only: [:index]
+  resources :operation_logs,   only: [:index, :show]
   resources :event_logs,       only: [:index]
   resources :transfers,        only: [:new, :create]
 

@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_01_091859) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_14_140000) do
   create_table "discount_codes", force: :cascade do |t|
     t.boolean "active", default: true, null: false
     t.integer "amount", null: false
@@ -46,11 +46,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_01_091859) do
     t.text "error_message"
     t.string "operation_name", null: false
     t.text "params_data"
+    t.string "parent_operation_name"
+    t.string "parent_reference_id"
     t.datetime "performed_at", null: false
+    t.string "reference_id"
+    t.text "result_data"
+    t.string "root_reference_id"
     t.boolean "success", null: false
     t.datetime "updated_at", null: false
     t.index ["operation_name"], name: "index_operation_logs_on_operation_name"
+    t.index ["parent_reference_id"], name: "index_operation_logs_on_parent_reference_id"
     t.index ["performed_at"], name: "index_operation_logs_on_performed_at"
+    t.index ["reference_id"], name: "index_operation_logs_on_reference_id", unique: true
+    t.index ["root_reference_id"], name: "index_operation_logs_on_root_reference_id"
     t.index ["success"], name: "index_operation_logs_on_success"
   end
 

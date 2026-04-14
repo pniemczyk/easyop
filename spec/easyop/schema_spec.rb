@@ -1,6 +1,8 @@
 require "spec_helper"
 
 RSpec.describe Easyop::Schema do
+  after(:each) { Easyop.reset_config! }
+
   def make_op(&blk)
     Class.new do
       include Easyop::Operation
@@ -11,6 +13,7 @@ RSpec.describe Easyop::Schema do
   # ── required params ───────────────────────────────────────────────────────────
 
   describe "required params" do
+
     let(:op) do
       make_op do
         params do
