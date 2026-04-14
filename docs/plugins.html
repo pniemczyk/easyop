@@ -12,7 +12,7 @@
 <aside class="sidebar">
   <div class="sidebar-header">
     <a href="index.html" class="sidebar-logo">EasyOp</a>
-    <span class="sidebar-version">v0.1.2</span>
+    <span class="sidebar-version">v0.1.3</span>
   </div>
   <nav class="sidebar-nav">
     <div class="nav-group">
@@ -29,6 +29,15 @@
     <div class="nav-group">
       <div class="nav-group-label">Plugins</div>
       <a href="plugins.html" class="active">All Plugins</a>
+      <a href="plugins.html#instrumentation" style="padding-left:1.5rem;font-size:0.8rem">Instrumentation</a>
+      <a href="plugins.html#recording" style="padding-left:1.5rem;font-size:0.8rem">Recording</a>
+      <a href="plugins.html#async" style="padding-left:1.5rem;font-size:0.8rem">Async</a>
+      <a href="plugins.html#transactional" style="padding-left:1.5rem;font-size:0.8rem">Transactional</a>
+      <a href="plugins.html#events" style="padding-left:1.5rem;font-size:0.8rem">Events</a>
+      <a href="plugins.html#event-handlers" style="padding-left:1.5rem;font-size:0.8rem">EventHandlers</a>
+      <a href="plugins.html#events-bus" style="padding-left:1.5rem;font-size:0.8rem">Events Bus</a>
+      <a href="plugins.html#custom-bus" style="padding-left:1.5rem;font-size:0.8rem">Custom Bus</a>
+      <a href="plugins.html#custom-plugin" style="padding-left:1.5rem;font-size:0.8rem">Custom Plugin</a>
     </div>
     <div class="nav-group">
       <div class="nav-group-label">Guides</div>
@@ -62,6 +71,14 @@
 require "easyop/plugins/recording"
 require "easyop/plugins/async"
 require "easyop/plugins/transactional"
+
+# Domain event plugins (opt-in separately):
+require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+require "easyop/plugins/event_handlers"
 
 class ApplicationOperation
   include Easyop::Operation
@@ -327,6 +344,349 @@ class ProcessOrder
   flow ValidateCart, ChargePayment, CreateOrder
 end</code></pre>
 
+      <h2 id="events">Plugin: Events (producer)</h2>
+      <p>Emit domain events after an operation completes. Events fire in an <code>ensure</code> block, so they publish even when <code>call!</code> raises <code>Ctx::Failure</code>. Individual publish failures are swallowed per-declaration and never crash the operation.</p>
+
+      <pre><code class="language-ruby">require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+
+class PlaceOrder &lt; ApplicationOperation
+  plugin Easyop::Plugins::Events
+
+  emits "order.placed",    on: :success, payload: [:order_id, :total]
+  emits "order.failed",    on: :failure, payload: ->(ctx) { { error: ctx.error } }
+  emits "order.attempted", on: :always
+  emits "vip.order.placed", on: :success, guard: ->(ctx) { ctx.total &gt; 1_000 }
+
+  def call
+    ctx.order_id = Order.create!(ctx.slice(:user_id, :items)).id
+    ctx.total    = ctx.items.sum { |i| i[:price] }
+  end
+end</code></pre>
+
+      <h3><code>emits</code> options</h3>
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Type</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>on:</code></td><td><code>:success</code> / <code>:failure</code> / <code>:always</code></td><td><code>:success</code></td><td>When to fire the event</td></tr>
+          <tr><td><code>payload:</code></td><td>Proc, Array, nil</td><td><code>nil</code></td><td>Proc receives <code>ctx</code>; Array slices ctx keys; <code>nil</code> passes full <code>ctx.to_h</code></td></tr>
+          <tr><td><code>guard:</code></td><td>Proc, nil</td><td><code>nil</code></td><td>Extra condition — event fires only if the Proc returns truthy</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Event object (<code>Easyop::Events::Event</code>)</h3>
+      <table>
+        <thead>
+          <tr><th>Attribute</th><th>Type</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>name</code></td><td>String (frozen)</td><td>Event name, e.g. <code>"order.placed"</code></td></tr>
+          <tr><td><code>payload</code></td><td>Hash (frozen)</td><td>Data carried by the event</td></tr>
+          <tr><td><code>source</code></td><td>String</td><td>Emitting operation class name</td></tr>
+          <tr><td><code>metadata</code></td><td>Hash (frozen)</td><td>Optional extra metadata (default <code>{}</code>)</td></tr>
+          <tr><td><code>timestamp</code></td><td>Time</td><td>Auto-set at instantiation if not provided</td></tr>
+        </tbody>
+      </table>
+      <pre><code class="language-ruby">event.to_h  # => { name:, payload:, source:, metadata:, timestamp: }</code></pre>
+
+      <h3>Inheritance</h3>
+      <p>Subclasses inherit all parent <code>emits</code> declarations and can add their own:</p>
+      <pre><code class="language-ruby">class PlaceSubscriptionOrder &lt; PlaceOrder
+  emits "subscription.placed", on: :success  # added on top of inherited declarations
+end</code></pre>
+
+      <h3>Per-class bus override</h3>
+      <pre><code class="language-ruby">plugin Easyop::Plugins::Events, bus: Easyop::Events::Bus::Memory.new</code></pre>
+
+      <h2 id="event-handlers">Plugin: EventHandlers (subscriber)</h2>
+      <p>Register an operation as a handler for domain events. Registration happens at class-load time via <code>Easyop::Events::Registry</code>. Supports exact names and glob patterns.</p>
+
+      <pre><code class="language-ruby">require "easyop/plugins/event_handlers"
+
+# Sync handler — ctx.event is an Easyop::Events::Event object,
+# payload keys are merged directly into ctx:
+class SendOrderConfirmation &lt; ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+
+  on "order.placed"
+
+  def call
+    event    = ctx.event        # Easyop::Events::Event
+    order_id = ctx.order_id     # from event.payload
+    OrderMailer.confirm(order_id).deliver_later
+  end
+end
+
+# Async handler — requires Plugins::Async on the same class.
+# ctx.event_data is a plain Hash (serializable for ActiveJob):
+class IndexOrder &lt; ApplicationOperation
+  plugin Easyop::Plugins::Async,         queue: "indexing"
+  plugin Easyop::Plugins::EventHandlers
+
+  on "order.*",      async: true             # one-segment wildcard
+  on "inventory.**", async: true, queue: "low"  # any-depth wildcard + queue override
+
+  def call
+    SearchIndex.reindex(ctx.order_id)
+  end
+end</code></pre>
+
+      <h3>Pattern syntax</h3>
+      <table>
+        <thead>
+          <tr><th>Pattern</th><th>Matches</th><th>Does not match</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>"order.placed"</code></td><td><code>"order.placed"</code></td><td><code>"order.placed.v2"</code></td></tr>
+          <tr><td><code>"order.*"</code></td><td><code>"order.placed"</code>, <code>"order.failed"</code></td><td><code>"order.placed.v2"</code></td></tr>
+          <tr><td><code>"warehouse.**"</code></td><td><code>"warehouse.stock.low"</code>, <code>"warehouse.alert.fire.east"</code></td><td><code>"warehouse"</code></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Dispatch context</h3>
+      <table>
+        <thead>
+          <tr><th>Mode</th><th><code>ctx.event</code></th><th>Payload keys</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Sync (default)</td><td><code>Easyop::Events::Event</code> object</td><td>Merged directly into ctx</td></tr>
+          <tr><td>Async</td><td>not set</td><td><code>ctx.event_data</code> (plain Hash) + payload keys</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout callout-tip">
+        <strong>Class-load registration</strong>
+        <code>on</code> calls <code>Easyop::Events::Registry.register_handler</code> immediately when the class body is evaluated. Configure the bus <em>before</em> loading handler classes — swapping the bus afterwards does not re-register existing subscriptions.
+      </div>
+
+      <h2 id="events-bus">Events Bus</h2>
+      <p>The bus is the transport layer between producers and handlers. Configure once at boot before any <code>EventHandlers</code> classes are loaded.</p>
+
+      <pre><code class="language-ruby"># config/initializers/easyop.rb
+
+# Built-in options:
+Easyop::Events::Registry.bus = :memory           # default — in-process, thread-safe
+Easyop::Events::Registry.bus = :active_support   # ActiveSupport::Notifications
+
+# Custom adapter — subclass Bus::Adapter (preferred) or pass a duck-typed object:
+Easyop::Events::Registry.bus = MyRabbitBus.new
+
+# Via configure block (applied when bus is first accessed):
+Easyop.configure { |c| c.event_bus = :active_support }</code></pre>
+
+      <h3>Built-in adapters</h3>
+      <table>
+        <thead>
+          <tr><th>Symbol</th><th>Class</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>:memory</code></td><td><code>Bus::Memory</code></td><td>In-process, synchronous, thread-safe via Mutex. Default.</td></tr>
+          <tr><td><code>:active_support</code></td><td><code>Bus::ActiveSupportNotifications</code></td><td>Wraps <code>ActiveSupport::Notifications</code>. Raises <code>LoadError</code> if not available.</td></tr>
+          <tr><td>any object</td><td><code>Bus::Custom</code></td><td>Auto-wraps any object responding to <code>#publish</code> + <code>#subscribe</code>. Validated at construction.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Test helpers</h3>
+      <pre><code class="language-ruby"># Reset the whole registry between test examples:
+Easyop::Events::Registry.reset!
+
+# Memory-bus specific:
+bus = Easyop::Events::Registry.bus   # Easyop::Events::Bus::Memory
+bus.clear!                            # remove all subscriptions
+bus.subscriber_count                  # => Integer</code></pre>
+
+      <h2 id="custom-bus">Building a Custom Bus</h2>
+
+      <p>
+        Subclass <code>Easyop::Events::Bus::Adapter</code> to build a transport-backed bus.
+        It inherits the glob helpers from <code>Bus::Base</code> and adds two protected utilities:
+      </p>
+
+      <table>
+        <thead>
+          <tr><th>Method</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>_safe_invoke(handler, event)</code></td>
+            <td>Calls <code>handler.call(event)</code>, rescues <code>StandardError</code>. One broken handler never blocks others.</td>
+          </tr>
+          <tr>
+            <td><code>_compile_pattern(pattern)</code></td>
+            <td>Compiles a glob/string to a <code>Regexp</code>, memoized per unique pattern string in the bus instance.</td>
+          </tr>
+          <tr>
+            <td><code>_pattern_matches?(pattern, name)</code></td>
+            <td>Inherited from <code>Bus::Base</code>. Returns <code>true</code> when pattern (glob or Regexp) matches the event name.</td>
+          </tr>
+          <tr>
+            <td><code>_glob_to_regex(glob)</code></td>
+            <td>Inherited from <code>Bus::Base</code>. Converts <code>"order.*"</code> → one-segment Regexp, <code>"order.**"</code> → multi-segment.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>Minimal example — logging decorator</h3>
+      <p>Wrap another bus and add structured logging. No external gems required.</p>
+
+      <pre><code class="language-ruby">require "easyop/events/bus/adapter"
+require "easyop/events/bus/memory"
+
+# Decorator: wraps any inner bus and logs every publish call.
+class LoggingBus &lt; Easyop::Events::Bus::Adapter
+  def initialize(inner = Easyop::Events::Bus::Memory.new)
+    super()
+    @inner = inner
+  end
+
+  def publish(event)
+    logger.info "[bus:publish] #{event.name} source=#{event.source} payload=#{event.payload}"
+    @inner.publish(event)
+  end
+
+  def subscribe(pattern, &block)
+    @inner.subscribe(pattern, &block)
+  end
+
+  def unsubscribe(handle)
+    @inner.unsubscribe(handle)
+  end
+
+  private
+
+  def logger
+    defined?(Rails) ? Rails.logger : Logger.new($stdout)
+  end
+end
+
+# config/initializers/easyop.rb
+Easyop::Events::Registry.bus = LoggingBus.new
+# Or wrap the ActiveSupport bus:
+Easyop::Events::Registry.bus = LoggingBus.new(Easyop::Events::Bus::ActiveSupportNotifications.new)</code></pre>
+
+      <h3>Full example — RabbitMQ (Bunny gem)</h3>
+      <p>
+        Uses a topic exchange so AMQP routing-key patterns map directly to EasyOp globs.
+        AMQP <code>*</code> matches exactly one dot-separated word (same as EasyOp <code>*</code>);
+        AMQP <code>#</code> matches zero-or-more words (maps from EasyOp <code>**</code>).
+      </p>
+
+      <pre><code class="language-ruby">require "bunny"
+require "json"
+require "easyop/events/bus/adapter"
+
+# Drop-in RabbitMQ bus for Easyop::Events.
+#
+#   Easyop::Events::Registry.bus = RabbitBus.new
+#   Easyop::Events::Registry.bus = RabbitBus.new(ENV["AMQP_URL"])
+#
+class RabbitBus &lt; Easyop::Events::Bus::Adapter
+  EXCHANGE_NAME = "easyop.events"
+
+  def initialize(amqp_url = ENV.fetch("AMQP_URL", "amqp://guest:guest@localhost"))
+    super()
+    @amqp_url  = amqp_url
+    @mutex     = Mutex.new
+    @handles   = {}   # handle.object_id => { queue:, consumer: }
+  end
+
+  # Publish +event+ to the topic exchange with routing_key = event.name.
+  # The full event hash is serialised to JSON.
+  def publish(event)
+    exchange.publish(
+      event.to_h.merge(timestamp: event.timestamp.iso8601).to_json,
+      routing_key:  event.name,
+      content_type: "application/json",
+      persistent:   false
+    )
+  end
+
+  # Bind an exclusive, auto-delete queue to the exchange and start consuming.
+  # Returns a handle that can be passed to #unsubscribe.
+  def subscribe(pattern, &block)
+    amqp_key = _to_amqp_pattern(pattern)
+    queue    = channel.queue("", exclusive: true, auto_delete: true)
+    queue.bind(exchange, routing_key: amqp_key)
+
+    consumer = queue.subscribe(manual_ack: false) do |_delivery, _props, body|
+      data  = JSON.parse(body, symbolize_names: true)
+      event = Easyop::Events::Event.new(
+                name:      data[:name].to_s,
+                payload:   data.fetch(:payload, {}),
+                metadata:  data.fetch(:metadata, {}),
+                source:    data[:source],
+                timestamp: data[:timestamp] ? Time.parse(data[:timestamp].to_s) : Time.now
+              )
+      _safe_invoke(block, event)
+    end
+
+    handle = Object.new  # unique, opaque token
+    @mutex.synchronize { @handles[handle.object_id] = { queue: queue, consumer: consumer } }
+    handle
+  end
+
+  # Cancel the consumer and delete the queue associated with +handle+.
+  def unsubscribe(handle)
+    @mutex.synchronize do
+      entry = @handles.delete(handle.object_id)
+      return unless entry
+      entry[:consumer].cancel
+      entry[:queue].delete
+    end
+  end
+
+  # Gracefully close the AMQP connection (call in an at_exit hook or Railtie).
+  def disconnect
+    @mutex.synchronize do
+      @connection&.close
+      @connection = nil
+      @channel    = nil
+      @exchange   = nil
+      @handles.clear
+    end
+  end
+
+  private
+
+  # Convert EasyOp glob → AMQP topic routing-key pattern.
+  #   "**"  →  "#"  (zero-or-more segments in AMQP)
+  #   "*"   →  "*"  (exactly one segment — identical semantics)
+  def _to_amqp_pattern(pattern)
+    return pattern.source if pattern.is_a?(Regexp)
+    pattern.gsub("**", "#")
+  end
+
+  def connection
+    @connection ||= Bunny.new(@amqp_url, recover_from_connection_close: true).tap(&:start)
+  end
+
+  def channel
+    @channel ||= connection.create_channel
+  end
+
+  def exchange
+    @exchange ||= channel.topic(EXCHANGE_NAME, durable: true)
+  end
+end
+
+# config/initializers/easyop.rb
+Easyop::Events::Registry.bus = RabbitBus.new
+
+# Optional: disconnect cleanly on shutdown
+at_exit { Easyop::Events::Registry.bus.disconnect }</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Duck-typed adapter (no subclassing)</strong>
+        If you already have an object with <code>#publish</code> and <code>#subscribe</code>, pass it directly.
+        The Registry auto-wraps it in <code>Bus::Custom</code> which validates the interface at construction time.
+        <pre style="margin-top:0.75rem"><code class="language-ruby">Easyop::Events::Registry.bus = MyExistingBusObject.new</code></pre>
+      </div>
+
       <h2 id="custom-plugin">Building a Custom Plugin</h2>
       <p>A plugin is any object responding to <code>.install(base_class, **options)</code>. Inherit from <code>Easyop::Plugins::Base</code> for a clean interface.</p>
 
@@ -403,7 +763,7 @@ end</code></pre>
 end</code></pre>
 
       <footer>
-        EasyOp v0.1.2 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.1.3 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>

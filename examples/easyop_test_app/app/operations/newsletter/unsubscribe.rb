@@ -8,6 +8,10 @@ module Newsletter
       required :email, :string
     end
 
+    # Domain event: downstream handlers (e.g. CRM sync) can react to unsubscribes.
+    emits "newsletter.unsubscribed", on: :success,
+          payload: ->(ctx) { { email: ctx.subscription.email } }
+
     rescue_from ActiveRecord::RecordNotFound, with: :handle_not_found
 
     def call

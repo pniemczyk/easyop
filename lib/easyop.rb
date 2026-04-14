@@ -18,6 +18,17 @@ require_relative "easyop/flow"
 # require "easyop/plugins/recording"
 # require "easyop/plugins/async"
 
+# Domain event plugins — require together or individually:
+# require "easyop/events/event"
+# require "easyop/events/bus"
+# require "easyop/events/bus/memory"
+# require "easyop/events/bus/active_support_notifications"
+# require "easyop/events/bus/custom"
+# require "easyop/events/bus/adapter"   # inherit this to build a custom bus
+# require "easyop/events/registry"
+# require "easyop/plugins/events"
+# require "easyop/plugins/event_handlers"
+
 module Easyop
   # Convenience: inherit from this instead of including Easyop::Operation
   # when you want a common base class for all your operations.

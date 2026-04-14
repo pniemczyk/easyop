@@ -12,6 +12,11 @@ module Articles
       required :article, Article
     end
 
+    # Domain event: emitted after a successful publish so other parts of the app
+    # (event log, future notification handlers, etc.) can react without coupling.
+    emits "article.published", on: :success,
+          payload: ->(ctx) { { article_id: ctx.article.id, title: ctx.article.title, user_id: ctx.article.user_id } }
+
     # after hook with a block — fires after call completes (even on success path)
     after { Rails.logger.info "[Articles::Publish] Article ##{ctx.article&.id} published at #{Time.current}" }
 

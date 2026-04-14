@@ -21,6 +21,9 @@ class ApplicationOperation
   plugin Easyop::Plugins::Recording, model: OperationLog
   plugin Easyop::Plugins::Async, queue: "operations"
   plugin Easyop::Plugins::Transactional
+  # Events plugin: subclasses declare `emits` to publish domain events.
+  # No events are emitted unless `emits` is declared on the subclass.
+  plugin Easyop::Plugins::Events
 
   # ── Global rescue handler ──────────────────────────────────────────────────
   rescue_from StandardError do |e|

@@ -38,7 +38,7 @@ Rails, Sinatra, Hanami, or standalone Ruby scripts.
 lib/
   easyop.rb                        # Entry point — requires all modules
   easyop/
-    version.rb                     # VERSION = "0.1.2"
+    version.rb                     # VERSION = "0.1.3"
     configuration.rb               # Easyop.configure { |c| ... }
     ctx.rb                         # Easyop::Ctx — the shared context/result object
     hooks.rb                       # Easyop::Hooks — before/after/around DSL
@@ -51,6 +51,17 @@ lib/
     adapters/                      # (reserved for future type adapter backends)
     plugins/
       transactional.rb             # Easyop::Plugins::Transactional — DB transaction wrap
+      events.rb                    # Easyop::Plugins::Events — domain event producer (emits DSL)
+      event_handlers.rb            # Easyop::Plugins::EventHandlers — domain event subscriber (on DSL)
+    events/
+      event.rb                     # Easyop::Events::Event — immutable frozen value object
+      bus.rb                       # Easyop::Events::Bus::Base — adapter interface + glob helpers
+      bus/
+        memory.rb                  # Easyop::Events::Bus::Memory — in-process, thread-safe
+        active_support_notifications.rb  # Easyop::Events::Bus::ActiveSupportNotifications
+        custom.rb                  # Easyop::Events::Bus::Custom — wraps user-provided adapter
+        adapter.rb                 # Easyop::Events::Bus::Adapter — inheritable base for custom buses
+      registry.rb                  # Easyop::Events::Registry — global bus + handler registry
 
 spec/
   spec_helper.rb
@@ -63,9 +74,23 @@ spec/
     flow_spec.rb                   # Flow sequential execution, rollback, guards, nesting
     flow_builder_spec.rb           # FlowBuilder on_success/on_failure/bind_with/on
     skip_spec.rb                   # skip_if DSL — skip predicate, rollback exclusion
+    events/
+      event_spec.rb                # Event construction, immutability, to_h
+      registry_spec.rb             # Registry bus config, register_handler, dispatch, reset!
+      bus/
+        memory_spec.rb             # Memory bus: publish/subscribe, glob patterns, thread safety
+        active_support_notifications_spec.rb
+        custom_spec.rb             # Custom bus: adapter validation, delegation
+        adapter_spec.rb            # Adapter base: _safe_invoke, _compile_pattern, memoization
+    plugins/
+      events_spec.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
+      event_handlers_spec.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
 
 examples/
-  usage.rb                         # 13 runnable examples (ruby -Ilib examples/usage.rb)
+  usage.rb                         # 16 runnable examples (ruby -Ilib examples/usage.rb)
+  easyop_test_app/                 # Full Rails 8 blog app demonstrating all plugins
+  ticketflow/                      # Full Rails 8 ticket-selling platform (6-step checkout flow,
+                                   #   Recording plugin, admin dashboard, skip_if, rollback)
 
 llms/
   overview.md                      # Architecture deep-dive for LLMs
@@ -217,6 +242,15 @@ always win over parent class handlers for the same exception class.
 | `Easyop::Operation` | Composes all modules; `call` / `call!` class methods; `_easyop_run` |
 | `Easyop::FlowBuilder` | Accumulates `on_success`/`on_failure` callbacks; `bind_with`/`on`; `call` |
 | `Easyop::Flow` | `flow` DSL; sequential step execution via `call!`; rollback on failure |
+| `Easyop::Events::Event` | Immutable frozen domain event value object |
+| `Easyop::Events::Bus::Base` | Abstract adapter interface: `publish`, `subscribe`, `unsubscribe`; glob→regex helpers |
+| `Easyop::Events::Bus::Adapter` | Inheritable base for custom buses; adds `_safe_invoke` + `_compile_pattern` (cached) |
+| `Easyop::Events::Bus::Memory` | In-process synchronous bus; thread-safe via Mutex |
+| `Easyop::Events::Bus::ActiveSupportNotifications` | Wraps `ActiveSupport::Notifications` |
+| `Easyop::Events::Bus::Custom` | Wraps any user object with `#publish`/`#subscribe` |
+| `Easyop::Events::Registry` | Global bus holder + thread-safe handler subscription registry |
+| `Easyop::Plugins::Events` | Producer plugin: `emits` DSL; RunWrapper fires events in `ensure` |
+| `Easyop::Plugins::EventHandlers` | Subscriber plugin: `on` DSL; registers at class-load time |
 
 ---
 

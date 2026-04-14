@@ -286,5 +286,112 @@ puts "\n13. ctx.slice"
 result = CheckoutFlow.call(coupon_code: "SAVE10")
 puts "  slice: #{result.slice(:discount, :total)}"
 
+# ── 14. Domain events — emitting (Plugins::Events) ────────────────────────────
+
+require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+
+# Use the in-process memory bus (default — no external deps)
+Easyop::Events::Registry.bus = :memory
+
+# Manually subscribe to capture events for inspection
+fired_events = []
+Easyop::Events::Registry.bus.subscribe("ticket.*") { |e| fired_events << e }
+
+class IssueTicket
+  include Easyop::Operation
+  plugin Easyop::Plugins::Events
+
+  emits "ticket.issued",       on: :success, payload: [:ticket_id, :seat]
+  emits "ticket.issue_failed", on: :failure, payload: ->(ctx) { { reason: ctx.error } }
+  emits "ticket.attempt",      on: :always
+
+  def call
+    ctx.fail!(error: "no_seats") if ctx.available.to_i.zero?
+    ctx.ticket_id = "#{ctx.seat.upcase}-001"
+  end
+end
+
+puts "\n14. Domain events — emitting (Plugins::Events)"
+r = IssueTicket.call(seat: "a1", available: 5)
+puts "  success? #{r.success?}  ticket_id=#{r.ticket_id}"
+puts "  events fired: #{fired_events.map(&:name).inspect}"
+# => ["ticket.issued", "ticket.attempt"]
+puts "  ticket.issued payload: #{fired_events.first.payload.inspect}"
+
+fired_events.clear
+r = IssueTicket.call(seat: "a1", available: 0)
+puts "  failure? #{r.failure?}  error=#{r.error}"
+puts "  events fired: #{fired_events.map(&:name).inspect}"
+# => ["ticket.issue_failed", "ticket.attempt"]
+
+# ── 15. Domain events — handling (Plugins::EventHandlers) ─────────────────────
+
+require "easyop/plugins/event_handlers"
+
+# Reset: gives a clean bus so NotifyCustomer's subscription is the only one.
+Easyop::Events::Registry.reset!
+
+class NotifyCustomer
+  include Easyop::Operation
+  plugin Easyop::Plugins::EventHandlers
+
+  @log = []
+  class << self; attr_reader :log; end
+
+  on "ticket.issued"        # exact pattern
+  on "ticket.issue_failed"  # exact pattern
+
+  def call
+    # ctx.event      → Easyop::Events::Event object
+    # ctx[:ticket_id] → use hash-style for optional payload keys (not all events carry ticket_id)
+    self.class.log << "#{ctx.event.name}:#{ctx[:ticket_id] || 'n/a'}"
+    puts "  [handler] #{ctx.event.name}  ticket_id=#{ctx[:ticket_id] || 'n/a'}"
+  end
+end
+
+puts "\n15. Domain events — handling (Plugins::EventHandlers)"
+IssueTicket.call(seat: "b2", available: 3)  # fires ticket.issued + ticket.attempt
+IssueTicket.call(seat: "b2", available: 0)  # fires ticket.issue_failed + ticket.attempt
+puts "  handler log: #{NotifyCustomer.log.inspect}"
+
+# ── 16. Custom bus via Bus::Adapter ────────────────────────────────────────────
+
+require "easyop/events/bus/adapter"
+
+# Decorator: wraps Memory and adds per-publish logging to stdout
+class VerboseBus < Easyop::Events::Bus::Adapter
+  attr_reader :publish_log
+
+  def initialize
+    super
+    @inner       = Easyop::Events::Bus::Memory.new
+    @publish_log = []
+  end
+
+  def publish(event)
+    entry = "#{event.name} → #{event.payload}"
+    @publish_log << entry
+    puts "  [VerboseBus] #{entry}"
+    @inner.publish(event)
+  end
+
+  def subscribe(pattern, &block) = @inner.subscribe(pattern, &block)
+  def unsubscribe(handle)        = @inner.unsubscribe(handle)
+end
+
+puts "\n16. Custom bus via Bus::Adapter (LoggingBus decorator)"
+verbose = VerboseBus.new
+Easyop::Events::Registry.bus = verbose
+Easyop::Events::Registry.bus.subscribe("ticket.*") { |e| puts "  [listener] received #{e.name}" }
+
+IssueTicket.call(seat: "c3", available: 2)
+puts "  VerboseBus publish_log: #{verbose.publish_log.inspect}"
+
+Easyop::Events::Registry.reset!
+
 puts "\n" + "=" * 60
 puts "All examples complete."

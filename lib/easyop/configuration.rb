@@ -8,9 +8,17 @@ module Easyop
     # When false (default), mismatches emit a warning and execution continues.
     attr_accessor :strict_types
 
+    # Bus adapter for domain events (Easyop::Plugins::Events / EventHandlers).
+    # Options: :memory (default), :active_support, or a bus adapter instance.
+    #
+    # @example
+    #   Easyop.configure { |c| c.event_bus = :active_support }
+    attr_accessor :event_bus
+
     def initialize
       @type_adapter = :native
       @strict_types = false
+      @event_bus    = nil  # nil = Memory bus (see Easyop::Events::Registry)
     end
   end
 

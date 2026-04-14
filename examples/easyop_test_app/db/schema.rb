@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_03_31_225430) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_14_120000) do
   create_table "articles", force: :cascade do |t|
     t.text "body", null: false
     t.datetime "created_at", null: false
@@ -30,6 +30,17 @@ ActiveRecord::Schema[8.1].define(version: 2026_03_31_225430) do
     t.string "subject", null: false
     t.datetime "updated_at", null: false
     t.index ["article_id"], name: "index_broadcasts_on_article_id"
+  end
+
+  create_table "event_logs", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.string "event_name", null: false
+    t.datetime "occurred_at", null: false
+    t.text "payload_data"
+    t.string "source"
+    t.datetime "updated_at", null: false
+    t.index ["event_name"], name: "index_event_logs_on_event_name"
+    t.index ["occurred_at"], name: "index_event_logs_on_occurred_at"
   end
 
   create_table "operation_logs", force: :cascade do |t|

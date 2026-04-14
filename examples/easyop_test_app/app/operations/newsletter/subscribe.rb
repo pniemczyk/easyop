@@ -15,6 +15,10 @@ module Newsletter
       optional :name,  :string, default: ""
     end
 
+    # Domain event: lets other parts of the app react to new subscriptions.
+    emits "newsletter.subscribed", on: :success,
+          payload: ->(ctx) { { email: ctx.subscription.email, name: ctx.subscription.name } }
+
     before :normalize_email
 
     rescue_from ActiveRecord::RecordInvalid do |e|

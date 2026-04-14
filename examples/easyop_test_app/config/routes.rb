@@ -10,6 +10,7 @@ Rails.application.routes.draw do
   resource  :registration, only: [:new, :create]
   resources :subscriptions,    only: [:new, :create, :destroy]
   resources :operation_logs,   only: [:index]
+  resources :event_logs,       only: [:index]
   resources :transfers,        only: [:new, :create]
 
   # Health check

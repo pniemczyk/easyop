@@ -1,0 +1,93 @@
+<% content_for :title, "Event Log" %>
+
+<div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem;">
+  <h1 style="margin: 0;">Domain Event Log</h1>
+  <% if @event_name_filter %>
+    <%= link_to "← all events", event_logs_path, style: "font-size: 0.9rem;" %>
+  <% end %>
+</div>
+
+<p style="color: #666; font-size: 0.9rem; margin-bottom: 1rem;">
+  Every domain event published via the EasyOp event bus is persisted here by
+  <code>Events::RecordEventLog</code> — an <code>Easyop::Plugins::EventHandlers</code>
+  subscriber that listens on <code>"**"</code>.
+</p>
+
+<%# ── Filter bar ──────────────────────────────────────────────────────────── %>
+<% unless @event_names.empty? %>
+  <div style="margin-bottom: 1rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;">
+    <span style="font-size: 0.85rem; color: #555;">Filter:</span>
+    <%= link_to "all",
+          event_logs_path,
+          style: "font-size: 0.85rem; padding: 2px 8px; border-radius: 3px; text-decoration: none;
+                  background: #{@event_name_filter ? '#eee' : '#333'}; color: #{@event_name_filter ? '#333' : 'white'};" %>
+    <% @event_names.each do |name| %>
+      <%= link_to name,
+            event_logs_path(event_name: name),
+            style: "font-size: 0.85rem; padding: 2px 8px; border-radius: 3px; text-decoration: none;
+                    background: #{@event_name_filter == name ? '#333' : '#eee'}; color: #{@event_name_filter == name ? 'white' : '#333'};" %>
+    <% end %>
+  </div>
+<% end %>
+
+<% if @event_logs.empty? %>
+  <p style="color: #888;">
+    No events yet.
+    <% if @event_name_filter %>
+      No <strong><%= @event_name_filter %></strong> events recorded.
+    <% else %>
+      Events appear here automatically whenever an operation emits one via
+      <code>emits "event.name"</code>.
+    <% end %>
+  </p>
+<% else %>
+  <p style="color: #666; font-size: 0.85rem;">
+    Showing <%= @event_logs.size %> event<%= @event_logs.size == 1 ? "" : "s" %>
+    <% if @event_name_filter %>
+      of type <strong><%= @event_name_filter %></strong>
+    <% end %>
+  </p>
+
+  <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+    <thead>
+      <tr style="background: #f5f5f5; text-align: left;">
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd; width: 22%;">Event</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd; width: 20%;">Source</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Payload</th>
+        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd; width: 18%;">Occurred At</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% @event_logs.each do |log| %>
+        <tr style="border-bottom: 1px solid #eee;">
+          <td style="padding: 0.5rem;">
+            <%= link_to log.event_name,
+                  event_logs_path(event_name: log.event_name),
+                  style: "font-family: monospace; font-size: 0.85rem;
+                          background: #e8f0fe; padding: 2px 6px; border-radius: 3px;
+                          text-decoration: none; color: #1a56db;" %>
+          </td>
+          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.82rem; color: #555;">
+            <%= log.source&.split("::")&.last || "—" %>
+          </td>
+          <td style="padding: 0.5rem;">
+            <% payload = log.payload %>
+            <% if payload.any? %>
+              <% payload.each do |key, value| %>
+                <span style="display: inline-block; margin-right: 0.5rem; font-size: 0.82rem;">
+                  <span style="color: #888;"><%= key %>:</span>
+                  <strong><%= value %></strong>
+                </span>
+              <% end %>
+            <% else %>
+              <span style="color: #aaa;">—</span>
+            <% end %>
+          </td>
+          <td style="padding: 0.5rem; color: #666; font-size: 0.85rem;">
+            <%= log.occurred_at.strftime("%Y-%m-%d %H:%M:%S") %>
+          </td>
+        </tr>
+      <% end %>
+    </tbody>
+  </table>
+<% end %>

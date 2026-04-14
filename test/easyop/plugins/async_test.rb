@@ -1,0 +1,185 @@
+# frozen_string_literal: true
+
+require 'test_helper'
+
+# Stub ActiveJob::Base if not already defined.
+unless defined?(ActiveJob::Base)
+  module ActiveJob
+    class Base
+      @@jobs = []
+
+      def self.queue_as(_q); end
+
+      def self.set(**opts)
+        proxy = Class.new do
+          define_singleton_method(:perform_later) { |*args| @@jobs << { args: args, opts: opts } }
+        end
+        proxy
+      end
+
+      def self.jobs
+        @@jobs
+      end
+
+      def self.clear_jobs!
+        @@jobs = []
+      end
+    end
+  end
+end
+
+class PluginsAsyncTest < Minitest::Test
+  include EasyopTestHelper
+
+  def setup
+    super
+    ActiveJob::Base.clear_jobs! if ActiveJob::Base.respond_to?(:clear_jobs!)
+    _reset_async_job!
+  end
+
+  def teardown
+    _reset_async_job!
+    super
+  end
+
+  def _reset_async_job!
+    Easyop::Plugins::Async.instance_variable_set(:@job_class, nil)
+    if Easyop::Plugins::Async.const_defined?(:Job, false)
+      Easyop::Plugins::Async.send(:remove_const, :Job)
+    end
+  end
+
+  def make_op(queue: 'default', &call_block)
+    klass = Class.new do
+      include Easyop::Operation
+    end
+    klass.plugin(Easyop::Plugins::Async, queue: queue)
+    klass.define_method(:call, &call_block) if call_block
+    klass
+  end
+
+  # ── call_async enqueues job ───────────────────────────────────────────────────
+
+  def test_dot_call_async_enqueues_job
+    op = make_op
+    set_const('AsyncTestOp', op)
+    op.call_async(name: 'alice')
+    assert_equal 1, ActiveJob::Base.jobs.size
+  end
+
+  def test_dot_call_async_passes_operation_class_name
+    op = make_op
+    set_const('AsyncTestOp2', op)
+    op.call_async(x: 1)
+    job = ActiveJob::Base.jobs.first
+    assert_equal 'AsyncTestOp2', job[:args].first
+  end
+
+  def test_dot_call_async_serializes_attrs_as_string_keys
+    op = make_op
+    set_const('AsyncTestOp3', op)
+    op.call_async(age: 30)
+    serialized = ActiveJob::Base.jobs.first[:args].last
+    assert serialized.key?('age')
+    assert_equal 30, serialized['age']
+  end
+
+  # ── Default queue ─────────────────────────────────────────────────────────────
+
+  def test_dot_call_async_uses_configured_queue
+    op = make_op(queue: 'broadcasts')
+    set_const('AsyncQueueOp', op)
+    op.call_async
+    job = ActiveJob::Base.jobs.first
+    assert_equal 'broadcasts', job[:opts][:queue]
+  end
+
+  def test_dot_call_async_queue_override_per_call
+    op = make_op(queue: 'default')
+    set_const('AsyncQueueOverOp', op)
+    op.call_async({}, queue: 'low')
+    job = ActiveJob::Base.jobs.first
+    assert_equal 'low', job[:opts][:queue]
+  end
+
+  # ── queue DSL on class ────────────────────────────────────────────────────────
+
+  def test_queue_class_method_sets_default_queue
+    op = make_op
+    op.queue('custom')
+    assert_equal 'custom', op._async_default_queue
+  end
+
+  def test_queue_inherited_from_parent
+    parent = make_op(queue: 'parent_queue')
+    child  = Class.new(parent)
+    assert_equal 'parent_queue', child._async_default_queue
+  end
+
+  # ── Raises LoadError without ActiveJob ───────────────────────────────────────
+
+  def test_dot_call_async_raises_load_error_without_active_job
+    aj_backup = ActiveJob.send(:remove_const, :Base)
+
+    op = make_op
+    set_const('AsyncNoAJOp', op)
+    err = assert_raises(LoadError) { op.call_async }
+    assert_includes err.message, 'ActiveJob'
+  ensure
+    ActiveJob.const_set(:Base, aj_backup) if defined?(aj_backup)
+  end
+
+  # ── ActiveRecord serialisation ────────────────────────────────────────────────
+
+  def test_ar_objects_serialized_by_class_and_id
+    # Fake AR object
+    ar_obj = Object.new
+    ar_obj.define_singleton_method(:class) do
+      kls = Object.new
+      kls.define_singleton_method(:name) { 'FakeUser' }
+      kls
+    end
+    ar_obj.define_singleton_method(:id) { 99 }
+
+    # Make it look like ActiveRecord::Base
+    ar_base = Class.new
+    stub_const = ar_base
+
+    # Temporarily define ActiveRecord::Base
+    unless defined?(ActiveRecord::Base)
+      Object.const_set(:ActiveRecord, Module.new)
+      ActiveRecord.const_set(:Base, ar_base)
+      defined_ar = true
+    end
+
+    # Override is_a? for the fake object
+    ar_obj.define_singleton_method(:is_a?) { |klass| klass == ActiveRecord::Base }
+
+    op = make_op
+    set_const('AsyncArOp', op)
+    op.call_async(user: ar_obj)
+    serialized = ActiveJob::Base.jobs.first[:args].last
+    assert_equal 'FakeUser', serialized['user']['__ar_class']
+    assert_equal 99,         serialized['user']['__ar_id']
+  ensure
+    if defined?(defined_ar) && defined_ar
+      ActiveRecord.send(:remove_const, :Base) rescue nil
+      Object.send(:remove_const, :ActiveRecord) rescue nil
+    end
+  end
+
+  # ── Job#perform deserializes and calls operation ──────────────────────────────
+
+  def test_job_perform_calls_operation
+    op = make_op { ctx[:ran] = true }
+    set_const('AsyncPerformOp', op)
+
+    # Force job_class creation
+    job_class = Easyop::Plugins::Async.job_class
+    job_instance = job_class.new
+    job_instance.perform('AsyncPerformOp', { 'x' => 42 })
+
+    # Because op.call is synchronous here, just verify no exception
+    # (ctx is not returned from perform, but call ran)
+  end
+end

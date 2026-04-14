@@ -8,12 +8,15 @@ description: >
   "add typed params to an operation", "use skip_if", "add rollback to a flow step",
   "how is easyop different from interactor", "use plugins", "add instrumentation to
   operations", "record operation executions", "run operations in background",
-  "wrap operation in transaction", "build a custom plugin", or when working with the
+  "wrap operation in transaction", "build a custom plugin", "emit domain events",
+  "subscribe to domain events", "publish domain events from an operation", "use
+  Easyop::Plugins::Events", "use Easyop::Plugins::EventHandlers", "use event bus",
+  "use easyop events", "handle domain events with easyop", or when working with the
   easyop gem in any Ruby or Rails project. Also activate when the user wants to
   implement the operation/command/service-object pattern, wrap business logic in a
-  testable object, chain operations in sequence, or register callbacks before
-  executing a flow.
-version: 0.1.2
+  testable object, chain operations in sequence, register callbacks before
+  executing a flow, or wire domain events between decoupled operations.
+version: 0.1.3
 ---
 
 # EasyOp Skill
@@ -337,6 +340,109 @@ class TransferFunds < ApplicationOperation
 end
 ```
 
+### Events (producer)
+
+Emit domain events after an operation completes. Requires the events infrastructure:
+
+```ruby
+require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+
+class PlaceOrder < ApplicationOperation
+  plugin Easyop::Plugins::Events
+
+  emits "order.placed",   on: :success, payload: [:order_id, :total]
+  emits "order.failed",   on: :failure, payload: ->(ctx) { { error: ctx.error } }
+  emits "order.attempted", on: :always
+
+  def call
+    ctx.order_id = Order.create!(ctx.to_h).id
+  end
+end
+```
+
+`emits` options: `on:` (`:success` / `:failure` / `:always`), `payload:` (Proc, Array of ctx keys, or nil for full ctx), `guard:` (optional condition Proc). Events fire in an `ensure` block so they publish even when `call!` raises. Publish failures are swallowed per-declaration and never crash the operation. Declarations are inherited by subclasses.
+
+### EventHandlers (subscriber)
+
+Register an operation as a handler for domain events. Uses `Easyop::Events::Registry` under the hood:
+
+```ruby
+require "easyop/plugins/event_handlers"
+
+class SendConfirmation < ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+
+  on "order.placed"
+
+  def call
+    event    = ctx.event        # Easyop::Events::Event object
+    order_id = ctx.order_id     # payload keys merged into ctx
+    OrderMailer.confirm(order_id).deliver_later
+  end
+end
+
+# Async dispatch (requires Plugins::Async also installed):
+class IndexOrder < ApplicationOperation
+  plugin Easyop::Plugins::Async,         queue: "indexing"
+  plugin Easyop::Plugins::EventHandlers
+
+  on "order.*",      async: true            # matches order.placed, order.failed, …
+  on "inventory.**", async: true, queue: "low"  # matches any depth
+
+  def call
+    SearchIndex.reindex(ctx.order_id)
+  end
+end
+```
+
+Glob patterns: `"order.*"` matches one segment; `"order.**"` matches any depth.
+Registration happens at class-load time. For async handlers, `ctx.event_data` holds a plain Hash (serializable for ActiveJob) instead of an Event object.
+
+### Events Bus
+
+Configure globally before handler classes load:
+
+```ruby
+# config/initializers/easyop.rb
+Easyop::Events::Registry.bus = :memory           # default — in-process, sync
+Easyop::Events::Registry.bus = :active_support   # ActiveSupport::Notifications
+Easyop::Events::Registry.bus = MyRabbitBus.new   # custom adapter
+
+# Or via configure block:
+Easyop.configure { |c| c.event_bus = :active_support }
+
+# In tests — reset between examples:
+Easyop::Events::Registry.reset!
+```
+
+**Building a custom bus** — subclass `Easyop::Events::Bus::Adapter`. Inherits glob helpers and adds `_safe_invoke` (call + rescue) and `_compile_pattern` (memoized glob→Regexp):
+
+```ruby
+require "easyop/events/bus/adapter"
+
+class LoggingBus < Easyop::Events::Bus::Adapter
+  def initialize(inner = Easyop::Events::Bus::Memory.new)
+    super(); @inner = inner
+  end
+
+  def publish(event)
+    Rails.logger.info "[bus] #{event.name} #{event.payload}"
+    @inner.publish(event)
+  end
+
+  def subscribe(pattern, &block) = @inner.subscribe(pattern, &block)
+  def unsubscribe(handle)        = @inner.unsubscribe(handle)
+end
+
+Easyop::Events::Registry.bus = LoggingBus.new
+```
+
+For duck-typed adapters (no subclassing), pass any object with `#publish` and `#subscribe` — Registry auto-wraps it in `Bus::Custom`.
+
 ### Custom plugins
 
 ```ruby
@@ -367,10 +473,11 @@ end
 - **`references/operations.md`** — All Operation DSL options
 - **`references/flow.md`** — Flow, FlowBuilder, skip_if, rollback, guards
 - **`references/hooks-and-rescue.md`** — Hooks and rescue_from deep-dive
-- **`references/plugins.md`** — All plugins: Instrumentation, Recording, Async, Transactional, custom
+- **`references/plugins.md`** — All plugins: Instrumentation, Recording, Async, Transactional, Events, EventHandlers, custom
 - **`examples/basic_operation.rb`** — Single operation patterns
 - **`examples/flow.rb`** — Flow composition patterns
 - **`examples/rails_controller.rb`** — Rails controller integration
 - **`examples/testing.rb`** — RSpec test patterns
+- **`examples/plugins.rb`** — All plugins: Instrumentation, Recording, Async, Transactional, Events, EventHandlers, Bus::Adapter (LoggingBus + full RabbitMQ example)
 
 ---

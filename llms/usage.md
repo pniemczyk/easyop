@@ -544,6 +544,224 @@ class ApplicationOperation
 end
 ```
 
+## 24. Events plugin — emitting domain events
+
+```ruby
+require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+
+class PlaceOrder < ApplicationOperation
+  plugin Easyop::Plugins::Events
+
+  # Fire on success, slicing two keys from ctx as payload
+  emits "order.placed", on: :success, payload: [:order_id, :total]
+
+  # Fire on failure, building payload with a lambda
+  emits "order.failed", on: :failure, payload: ->(ctx) { { error: ctx.error } }
+
+  # Fire always (success and failure)
+  emits "order.attempted", on: :always
+
+  # Fire only when a guard condition is met
+  emits "order.premium", on: :success, guard: ->(ctx) { ctx.premium? }
+
+  def call
+    ctx.order_id = Order.create!(ctx.to_h).id
+  end
+end
+
+PlaceOrder.call(user_id: 1, total: 9900, premium: true)
+# => fires "order.placed", "order.attempted", "order.premium"
+```
+
+`payload:` options:
+- `nil` (default) — sends the full `ctx.to_h`
+- `Array` — slices those keys: `[:order_id, :total]`
+- `Proc` — called with ctx, return value becomes payload
+
+Events fire in an `ensure` block after `_easyop_run`. Publish failures are swallowed.
+
+## 25. EventHandlers plugin — subscribing to domain events
+
+```ruby
+require "easyop/plugins/event_handlers"
+
+# Basic sync handler
+class SendConfirmation < ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+  on "order.placed"
+
+  def call
+    event    = ctx.event       # Easyop::Events::Event instance
+    order_id = ctx.order_id    # payload keys merged into ctx
+    OrderMailer.confirm(order_id).deliver_later
+  end
+end
+
+# Wildcard — matches order.placed, order.shipped, order.refunded, etc.
+class AuditOrderEvent < ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+  on "order.*"
+
+  def call
+    AuditLog.create!(event: ctx.event.name, data: ctx.event.payload)
+  end
+end
+
+# Deep wildcard — matches warehouse.stock.updated, warehouse.zone.moved, etc.
+class SyncWarehouse < ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+  on "warehouse.**"
+  def call; WarehouseSync.run(ctx.event.payload); end
+end
+
+# Async dispatch (requires Plugins::Async installed on the class)
+class IndexOrder < ApplicationOperation
+  plugin Easyop::Plugins::Async, queue: "indexing"
+  plugin Easyop::Plugins::EventHandlers
+
+  on "order.*", async: true
+  on "inventory.**", async: true, queue: "low"
+
+  def call
+    # For async: ctx.event_data is a plain Hash (serialized for ActiveJob)
+    # ctx.event is NOT the Event object here — reconstruct if needed:
+    # event = Easyop::Events::Event.new(**ctx.event_data)
+    SearchIndex.reindex(ctx.order_id)
+  end
+end
+```
+
+## 26. Configuring the event bus
+
+```ruby
+# config/initializers/easyop_events.rb
+# Set the bus BEFORE handler classes are autoloaded.
+
+# Option A: Memory (default — good for tests, simple setups, no external deps)
+Easyop::Events::Registry.bus = :memory
+
+# Option B: ActiveSupport::Notifications (integrates with Rails tracing)
+Easyop::Events::Registry.bus = :active_support
+
+# Option C: Custom adapter (see pattern 27 for subclassing; or duck-typed):
+Easyop::Events::Registry.bus = MyRabbitBus.new   # auto-wrapped in Bus::Custom
+
+# Option D: Via config block
+Easyop.configure { |c| c.event_bus = :active_support }
+
+# In tests — reset between examples:
+before { Easyop::Events::Registry.reset! }
+
+# Memory-bus test helpers:
+bus = Easyop::Events::Registry.bus
+bus.clear!           # remove all subscriptions without resetting the registry
+bus.subscriber_count # => Integer
+```
+
+## 27. Building a custom bus (Bus::Adapter)
+
+Subclass `Easyop::Events::Bus::Adapter` when building a transport-backed bus.
+It inherits all glob helpers from `Bus::Base` and adds:
+
+- `_safe_invoke(handler, event)` — protected; calls handler + rescues `StandardError`
+- `_compile_pattern(pattern)` — protected; glob/string → `Regexp`, memoized per instance
+
+Minimum contract: implement `#publish` and `#subscribe`. Override `#unsubscribe` if your
+transport supports cancellation.
+
+```ruby
+require "easyop/events/bus/adapter"
+require "easyop/events/bus/memory"
+
+# Example A — Decorator (no external deps): wraps any inner bus + adds logging
+class LoggingBus < Easyop::Events::Bus::Adapter
+  def initialize(inner = Easyop::Events::Bus::Memory.new)
+    super()
+    @inner = inner
+  end
+
+  def publish(event)
+    Rails.logger.info "[bus:publish] #{event.name} src=#{event.source} payload=#{event.payload}"
+    @inner.publish(event)
+  end
+
+  def subscribe(pattern, &block) = @inner.subscribe(pattern, &block)
+  def unsubscribe(handle)        = @inner.unsubscribe(handle)
+end
+
+Easyop::Events::Registry.bus = LoggingBus.new
+# Or wrap a specific inner bus:
+Easyop::Events::Registry.bus = LoggingBus.new(Easyop::Events::Bus::ActiveSupportNotifications.new)
+```
+
+```ruby
+# Example B — RabbitMQ (Bunny gem): full production implementation
+require "bunny"; require "json"
+
+class RabbitBus < Easyop::Events::Bus::Adapter
+  EXCHANGE = "easyop.events"
+
+  def initialize(url = ENV.fetch("AMQP_URL", "amqp://localhost"))
+    super()
+    @url = url; @mutex = Mutex.new; @handles = {}
+  end
+
+  def publish(event)
+    exchange.publish(event.to_h.merge(timestamp: event.timestamp.iso8601).to_json,
+                     routing_key: event.name, content_type: "application/json")
+  end
+
+  def subscribe(pattern, &block)
+    q = channel.queue("", exclusive: true, auto_delete: true)
+    q.bind(exchange, routing_key: _amqp(pattern))
+    consumer = q.subscribe { |_, _, body| _safe_invoke(block, _decode(body)) }
+    handle = Object.new
+    @mutex.synchronize { @handles[handle.object_id] = { queue: q, consumer: consumer } }
+    handle
+  end
+
+  def unsubscribe(handle)
+    @mutex.synchronize do
+      e = @handles.delete(handle.object_id); return unless e
+      e[:consumer].cancel; e[:queue].delete
+    end
+  end
+
+  def disconnect
+    @mutex.synchronize { @connection&.close; @connection = @channel = @exchange = nil }
+  end
+
+  private
+
+  # EasyOp "**" → AMQP "#" (zero-or-more segments); "*" → "*" (one segment — same)
+  def _amqp(p) = p.is_a?(Regexp) ? p.source : p.gsub("**", "#")
+
+  def _decode(body)
+    d = JSON.parse(body, symbolize_names: true)
+    Easyop::Events::Event.new(name: d[:name], payload: d.fetch(:payload, {}),
+                              metadata: d.fetch(:metadata, {}), source: d[:source],
+                              timestamp: d[:timestamp] ? Time.parse(d[:timestamp].to_s) : Time.now)
+  end
+
+  def connection = @connection ||= Bunny.new(@url, recover_from_connection_close: true).tap(&:start)
+  def channel    = @channel    ||= connection.create_channel
+  def exchange   = @exchange   ||= channel.topic(EXCHANGE, durable: true)
+end
+
+Easyop::Events::Registry.bus = RabbitBus.new
+at_exit { Easyop::Events::Registry.bus.disconnect }
+```
+
+Key invariants when implementing a custom bus:
+- Always call `super()` from `initialize` (sets up `@_pattern_cache`)
+- In `publish`, use `_safe_invoke(handler, event)` — never call `handler.call` directly
+- Compile patterns once via `_compile_pattern` — don't call `_glob_to_regex` per-publish
+- Never hold the mutex while invoking handlers (snapshot first, then call outside lock)
+
 ## 18. Common mistakes
 
 ```ruby

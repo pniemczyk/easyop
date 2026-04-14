@@ -19,6 +19,11 @@ module Newsletter
       optional :article_id, :integer
     end
 
+    # Domain event: lets analytics/monitoring react to broadcasts without
+    # coupling them to the send path.
+    emits "broadcast.sent", on: :success,
+          payload: ->(ctx) { { broadcast_id: ctx.broadcast_id, recipients_count: ctx.recipients_count } }
+
     rescue_from ActiveRecord::RecordInvalid do |e|
       ctx.fail!(error: "Could not create broadcast record", errors: e.record.errors.to_h)
     end

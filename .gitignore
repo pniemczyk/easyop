@@ -67,3 +67,6 @@ examples/ticketflow/node_modules
 examples/ticketflow/public/assets
 examples/ticketflow/public/packs
 examples/ticketflow/coverage
+
+# Claude Code local settings
+.claude/settings.local.json

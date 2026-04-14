@@ -30,6 +30,17 @@ lib/
       recording.rb             # Easyop::Plugins::Recording — persists executions to AR model
       async.rb                 # Easyop::Plugins::Async — .call_async via ActiveJob
       transactional.rb         # Easyop::Plugins::Transactional — DB transaction wrapper
+      events.rb                # Easyop::Plugins::Events — domain event producer (emits DSL)
+      event_handlers.rb        # Easyop::Plugins::EventHandlers — domain event subscriber (on DSL)
+    events/
+      event.rb                 # Easyop::Events::Event — immutable frozen value object
+      bus.rb                   # Easyop::Events::Bus::Base — adapter interface
+      bus/
+        memory.rb              # Easyop::Events::Bus::Memory — in-process default
+        active_support_notifications.rb  # Easyop::Events::Bus::ActiveSupportNotifications
+        custom.rb              # Easyop::Events::Bus::Custom — wraps user adapter
+        adapter.rb             # Easyop::Events::Bus::Adapter — inheritable base for custom buses
+      registry.rb              # Easyop::Events::Registry — global bus + subscriptions
 spec/
   easyop/                      # RSpec specs, one file per module
 examples/
@@ -248,6 +259,88 @@ Wraps `prepare { call }` in an AR/Sequel transaction.
 Opt out: `transactional false`.
 Works with `include` style and `plugin` DSL.
 
+### Events (producer plugin)
+
+Emits domain events after `_easyop_run` completes (in an `ensure` block).
+Bus adapter is configurable. Declarations are inherited by subclasses.
+
+```ruby
+require "easyop/events/event"
+require "easyop/events/bus"
+require "easyop/events/bus/memory"
+require "easyop/events/registry"
+require "easyop/plugins/events"
+
+class PlaceOrder < ApplicationOperation
+  plugin Easyop::Plugins::Events
+
+  emits "order.placed", on: :success, payload: [:order_id, :total]
+  emits "order.failed", on: :failure, payload: ->(ctx) { { error: ctx.error } }
+  emits "order.attempted", on: :always, guard: ->(ctx) { ctx.user_id? }
+end
+```
+
+`emits` options: `on:` (`:success`/`:failure`/`:always`), `payload:` (Proc/Array/nil), `guard:` (Proc).
+
+### EventHandlers (subscriber plugin)
+
+Registers an operation as a handler for domain events. Registration happens at class-load time.
+
+```ruby
+require "easyop/plugins/event_handlers"
+
+class SendConfirmation < ApplicationOperation
+  plugin Easyop::Plugins::EventHandlers
+  on "order.placed"
+
+  def call
+    OrderMailer.confirm(ctx.order_id).deliver_later
+  end
+end
+```
+
+Glob patterns: `"order.*"` (one segment), `"warehouse.**"` (any depth).
+Async: `on "order.*", async: true, queue: "low"` — requires `Plugins::Async` also installed.
+Handler receives `ctx.event` (Event object, sync) or `ctx.event_data` (Hash, async) + payload keys.
+
+### Events Registry and Bus
+
+```ruby
+# Configure globally before handler classes load:
+Easyop::Events::Registry.bus = :memory           # default (in-process, sync)
+Easyop::Events::Registry.bus = :active_support   # ActiveSupport::Notifications
+Easyop::Events::Registry.bus = MyRabbitBus.new   # custom adapter
+
+# Or via config:
+Easyop.configure { |c| c.event_bus = :active_support }
+
+# Reset in tests:
+Easyop::Events::Registry.reset!
+```
+
+`Bus::Memory` is thread-safe (Mutex).
+
+**Custom bus adapters** — two options:
+
+| Approach | When to use |
+|---|---|
+| Subclass `Bus::Adapter` | Building a new transport (RabbitMQ, Redis, Kafka, …). Inherits `_safe_invoke` + `_compile_pattern`. |
+| Pass a duck-typed object | Wrapping an existing object that already responds to `#publish`/`#subscribe`. Registry auto-wraps it in `Bus::Custom`. |
+
+`Bus::Adapter` protected helpers:
+
+| Method | Description |
+|---|---|
+| `_safe_invoke(handler, event)` | Calls `handler.call(event)`, rescues `StandardError`. Prevents one broken handler from blocking others. |
+| `_compile_pattern(pattern)` | Converts a glob/string to a `Regexp`, memoized per unique pattern string in the bus instance. |
+
+`Bus::Base` private helpers (inherited by both `Bus::Adapter` and the built-in adapters):
+
+| Method | Description |
+|---|---|
+| `_pattern_matches?(pattern, name)` | Returns true when `pattern` (String glob or Regexp) matches `name`. |
+| `_glob_to_regex(glob)` | Converts `"order.*"` → `/\Aorder\.[^.]+\z/`, `"warehouse.**"` → `/\Awarehouse\..+\z/`. |
+
 ### Plugin execution order
 
 ```
@@ -301,6 +394,21 @@ appears before `Operation#call` (a no-op) in the MRO.
 
 `_rescue_handlers` stores only own handlers; `_all_rescue_handlers` returns
 own + parent handlers. Child class handlers always take priority.
+
+### Events fire in ensure — never crash the operation
+
+The Events plugin's `RunWrapper` wraps `_easyop_run` with an `ensure` block.
+Events are published after `super` returns (or raises). Individual publish failures
+are rescued per-declaration — one broken handler never blocks others.
+
+The `if:` keyword cannot be used as a Ruby method keyword argument without workarounds;
+use `guard:` instead for the optional condition Proc.
+
+### EventHandlers register at class-load time
+
+`on` calls `Easyop::Events::Registry.register_handler` immediately when the class body
+is evaluated. The bus active at that moment receives the subscription. Swapping the bus
+after handler classes load does not re-register existing subscriptions.
 
 ### Rollback stores instances, not classes
 

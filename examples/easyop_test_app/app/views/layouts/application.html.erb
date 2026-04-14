@@ -36,6 +36,7 @@
       <%= link_to "Subscribe", new_subscription_path %>
       <% if logged_in? %>
         <%= link_to "Op Logs", operation_logs_path %>
+        <%= link_to "Event Log", event_logs_path %>
       <% end %>
       <% if logged_in? %>
         <%= link_to "Transfer Credits", new_transfer_path %>

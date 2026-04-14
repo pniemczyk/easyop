@@ -20,6 +20,12 @@ module Users
       required :user, User
     end
 
+    # Domain event: fired on successful registration so downstream handlers
+    # (welcome emails, analytics, etc.) can react without coupling to this class.
+    emits "user.registered", on: :success,
+          payload: ->(ctx) { { user_id: ctx.user.id, email: ctx.user.email,
+                               newsletter_opt_in: ctx.user.newsletter_opt_in } }
+
     # before hook (symbol) — normalizes email before validation/create
     before :normalize_email
 
