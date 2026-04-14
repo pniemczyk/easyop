@@ -140,6 +140,28 @@ end
 # Also accepts: record_result: ->(ctx) { { id: ctx.record_id } }
 #               record_result: :build_result
 
+# Scrubbing params — all layers are additive (built-in SCRUBBED_KEYS are always applied):
+
+# Layer 1 — global config (applied to every recorded operation):
+Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }
+
+# Layer 2 — plugin install option (applied to all subclasses):
+class ApplicationOperation
+  include Easyop::Operation
+  plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+end
+
+# Layer 3 — class DSL (inherited + stackable):
+class ApplicationOperation
+  scrub_params :internal_ref, /access.?key/i
+end
+
+class Payments::ChargeCard < ApplicationOperation
+  scrub_params :card_number   # stacks on top of ApplicationOperation's list
+  # Final scrub list for Payments::ChargeCard:
+  # SCRUBBED_KEYS + global config + :stripe_secret + :internal_ref + /access.?key/i + :card_number
+end
+
 # Default: all ops are recorded. Opt out per class:
 class Newsletter::SendBroadcast < ApplicationOperation
   recording false   # skip logging for this operation

@@ -38,7 +38,7 @@ Rails, Sinatra, Hanami, or standalone Ruby scripts.
 lib/
   easyop.rb                        # Entry point — requires all modules
   easyop/
-    version.rb                     # VERSION = "0.1.3"
+    version.rb                     # VERSION = "0.1.5"
     configuration.rb               # Easyop.configure { |c| ... }
     ctx.rb                         # Easyop::Ctx — the shared context/result object
     hooks.rb                       # Easyop::Hooks — before/after/around DSL
@@ -85,7 +85,7 @@ spec/
     plugins/
       events_spec.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
       event_handlers_spec.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
-      recording_spec.rb            # Recording plugin: persist, scrub, opt-out, flow tracing, record_result DSL
+      recording_spec.rb            # Recording plugin: persist, scrub, opt-out, flow tracing, record_result DSL, scrub_params DSL
 
 test/
   easyop/
@@ -257,7 +257,7 @@ always win over parent class handlers for the same exception class.
 | `Easyop::Events::Registry` | Global bus holder + thread-safe handler subscription registry |
 | `Easyop::Plugins::Events` | Producer plugin: `emits` DSL; RunWrapper fires events in `ensure` |
 | `Easyop::Plugins::EventHandlers` | Subscriber plugin: `on` DSL; registers at class-load time |
-| `Easyop::Plugins::Recording` | Persists executions to AR model; flow tracing via `root_reference_id`/`reference_id`/`parent_*` columns (optional); `record_result` DSL for `result_data` output capture (optional) — all backward-compatible |
+| `Easyop::Plugins::Recording` | Persists executions to AR model; flow tracing via `root_reference_id`/`reference_id`/`parent_*` columns (optional); `record_result` DSL for `result_data` output capture (optional); `scrub_params` DSL + `scrub_keys:` plugin option + global `recording_scrub_keys` config for additive key scrubbing — all backward-compatible |
 
 ---
 

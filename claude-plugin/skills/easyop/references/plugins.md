@@ -74,6 +74,7 @@ end
 | `model:` | required | ActiveRecord class |
 | `record_params:` | `true` | Set `false` to skip params serialization |
 | `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol) |
+| `scrub_keys:` | `[]` | Extra keys/patterns to scrub from `params_data` (Symbol, String, Regexp) |
 
 **Required migration:**
 ```ruby
@@ -140,10 +141,30 @@ plugin Easyop::Plugins::Recording, model: OperationLog,
 
 Class-level `record_result` overrides the plugin default. Missing ctx keys → `nil`. AR objects → `{ "id" => 42, "class" => "User" }`. Serialization errors are swallowed. Column silently skipped when absent (backward-compatible).
 
-**Scrubbed keys** (never appear in `params_data`):
-`:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+**Scrubbed keys** — all layers are additive (none replaces the built-in list):
 
-Internal tracing keys (`__recording_*`) are also excluded from `params_data`.
+1. **Built-in `SCRUBBED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+2. **Global config** — `Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }`
+3. **Plugin option** — `scrub_keys: [:stripe_token, /secret/i]` on `plugin ... Recording`
+4. **Class DSL** — `scrub_params :card_number, /access.?key/i` — inheritable, stackable per class
+
+```ruby
+# Global (initializer):
+Easyop.configure { |c| c.recording_scrub_keys = [:api_token] }
+
+# Plugin install:
+plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+
+# Per class:
+class ApplicationOperation < ...
+  scrub_params :internal_token, /key/i
+end
+class Orders::CreateOrder < ApplicationOperation
+  scrub_params :card_number   # stacks on top of parent's list
+end
+```
+
+Internal tracing keys (`__recording_*`) are always excluded from `params_data`.
 
 AR objects in ctx are serialized as `{ "id" => 42, "class" => "User" }`.
 

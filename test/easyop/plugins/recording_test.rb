@@ -619,4 +619,134 @@ class PluginsRecordingTest < Minitest::Test
     data = JSON.parse(result_model.records.last[:result_data])
     assert_equal({ 'info' => 'child-value' }, data)
   end
+
+  # ── custom scrub_keys ─────────────────────────────────────────────────────────
+
+  def test_scrub_keys_plugin_install_symbol
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [:api_token]
+      def call; end
+    end
+    set_const('ScrubInstallMT', op)
+    op.call(name: 'Alice', api_token: 'tok_123')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('api_token')
+    assert_equal 'Alice', data['name']
+  end
+
+  def test_scrub_keys_plugin_install_regexp
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [/token/i]
+      def call; end
+    end
+    set_const('ScrubRegexpMT', op)
+    op.call(auth_token: 'abc', name: 'Bob')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('auth_token')
+    assert_equal 'Bob', data['name']
+  end
+
+  def test_scrub_params_class_dsl_symbol
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      scrub_params :session_id
+      def call; end
+    end
+    set_const('ScrubDslMT', op)
+    op.call(session_id: 'sess_xyz', name: 'Carol')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('session_id')
+    assert_equal 'Carol', data['name']
+  end
+
+  def test_scrub_params_class_dsl_regexp
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      scrub_params(/private/i)
+      def call; end
+    end
+    set_const('ScrubDslRegexpMT', op)
+    op.call(private_note: 'internal', name: 'Dave')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('private_note')
+    assert_equal 'Dave', data['name']
+  end
+
+  def test_scrub_params_inherited_additive
+    m = model
+    base = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      scrub_params :base_secret
+      def call; end
+    end
+    set_const('ScrubBaseMT', base)
+    child = Class.new(base) do
+      scrub_params :child_secret
+    end
+    set_const('ScrubChildMT', child)
+
+    child.call(base_secret: 'x', child_secret: 'y', name: 'Eve')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('base_secret'),  'base_secret should be scrubbed by child'
+    refute data.key?('child_secret'), 'child_secret should be scrubbed by child'
+    assert_equal 'Eve', data['name']
+  end
+
+  def test_scrub_keys_global_config_symbol
+    Easyop.configure { |c| c.recording_scrub_keys = [:global_secret] }
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; end
+    end
+    set_const('ScrubGlobalMT', op)
+    op.call(global_secret: 'x', name: 'Frank')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('global_secret')
+    assert_equal 'Frank', data['name']
+  end
+
+  def test_scrub_keys_global_config_regexp
+    Easyop.configure { |c| c.recording_scrub_keys = [/access.?key/i] }
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; end
+    end
+    set_const('ScrubGlobalRegexpMT', op)
+    op.call(access_key: 'k', name: 'Grace')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('access_key')
+    assert_equal 'Grace', data['name']
+  end
+
+  def test_all_scrub_layers_are_additive
+    Easyop.configure { |c| c.recording_scrub_keys = [:global_key] }
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [:install_key]
+      scrub_params :class_key
+      def call; end
+    end
+    set_const('ScrubAllLayersMT', op)
+    op.call(password: 'p', global_key: 'g', install_key: 'i', class_key: 'c', name: 'Heidi')
+    data = JSON.parse(m.records.last[:params_data])
+    refute data.key?('password'),    'built-in SCRUBBED_KEYS'
+    refute data.key?('global_key'),  'global config'
+    refute data.key?('install_key'), 'plugin install scrub_keys'
+    refute data.key?('class_key'),   'class scrub_params DSL'
+    assert_equal 'Heidi', data['name']
+  end
 end

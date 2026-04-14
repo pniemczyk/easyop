@@ -647,6 +647,7 @@ end
 | `model:` | required | ActiveRecord class to write logs into |
 | `record_params:` | `true` | Set `false` to skip serializing ctx params |
 | `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol — see below) |
+| `scrub_keys:` | `[]` | Extra keys/patterns to scrub from `params_data` (Symbol, String, Regexp) — additive with built-in list |
 
 **Required model columns:**
 
@@ -696,7 +697,28 @@ root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference
 OperationLog.for_tree(root_log.root_reference_id)
 ```
 
-The plugin automatically scrubs these keys from `params_data` before persisting: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`. ActiveRecord objects are serialized as `{ id:, class: }` rather than their full representation.
+**Scrubbing params** — all layers are additive (none replaces the built-in list):
+
+1. **Built-in `SCRUBBED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+2. **Global config** — applied to every recorded operation:
+   ```ruby
+   Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }
+   ```
+3. **Plugin `scrub_keys:` option** — applied to all subclasses that share the plugin install:
+   ```ruby
+   plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+   ```
+4. **`scrub_params` DSL** — per-class, inheritable, and stackable at any level of the hierarchy:
+   ```ruby
+   class ApplicationOperation < ...
+     scrub_params :internal_token, /access.?key/i
+   end
+   class Payments::ChargeCard < ApplicationOperation
+     scrub_params :card_number   # stacks on top of parent's list
+   end
+   ```
+
+Internal tracing keys (`__recording_*`) are always excluded. ActiveRecord objects are serialized as `{ id:, class: }` rather than their full representation.
 
 **`record_result` DSL — capture output data:**
 
@@ -1459,7 +1481,7 @@ Edit `lib/easyop/version.rb` and increment the version string following [Semanti
 ```ruby
 # lib/easyop/version.rb
 module Easyop
-  VERSION = "0.1.4"   # was 0.1.3
+  VERSION = "0.1.5"   # was 0.1.4
 end
 ```
 
@@ -1470,45 +1492,45 @@ In `CHANGELOG.md`, move everything under `[Unreleased]` into a new versioned sec
 ```markdown
 ## [Unreleased]
 
-## [0.1.4] — YYYY-MM-DD   # ← new section
+## [0.1.5] — YYYY-MM-DD   # ← new section
 
 ### Added
 - …
 
-## [0.1.3] — 2026-04-14
+## [0.1.4] — 2026-04-14
 ```
 
 Add a comparison link at the bottom of the file:
 
 ```markdown
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/pniemczyk/easyop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pniemczyk/easyop/compare/v0.1.3...v0.1.4
-[0.1.3]: https://github.com/pniemczyk/easyop/compare/v0.1.2...v0.1.3
 ```
 
 ### 3. Commit the release changes
 
 ```bash
 git add lib/easyop/version.rb CHANGELOG.md
-git commit -m "Release v0.1.4"
+git commit -m "Release v0.1.5"
 ```
 
 ### 4. Tag the commit
 
 ```bash
-git tag -a v0.1.4 -m "Release v0.1.4"
+git tag -a v0.1.5 -m "Release v0.1.5"
 ```
 
 ### 5. Push the commit and tag
 
 ```bash
 git push origin master
-git push origin v0.1.4
+git push origin v0.1.5
 ```
 
 ### 6. Build and push the gem (optional)
 
 ```bash
 gem build easyop.gemspec
-gem push easyop-0.1.4.gem
+gem push easyop-0.1.5.gem
 ```

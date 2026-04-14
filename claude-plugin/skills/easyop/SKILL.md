@@ -1,7 +1,7 @@
 ---
 name: easyop
 description: Use when working with the easyop gem — operations, flows, ctx.fail!, hooks, schema DSL, skip_if, rollback, plugins (Recording, Async, Transactional, Events), or the Ruby service-object / command pattern.
-version: 0.1.4
+version: 0.1.5
 ---
 
 # EasyOp Skill

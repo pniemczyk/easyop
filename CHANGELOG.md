@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-04-14
+
+### Added
+
+- **`scrub_params` DSL for `Easyop::Plugins::Recording`** — declare additional params keys/patterns to scrub from `params_data` on a per-class basis. Accepts `Symbol`, `String`, or `Regexp`. Additive with `SCRUBBED_KEYS` and never replaces the built-in list. Inherited by subclasses; any level of the hierarchy can override.
+
+  ```ruby
+  class ApplicationOperation < ...
+    scrub_params :api_token, /access.?key/i
+  end
+
+  class Orders::CreateOrder < ApplicationOperation
+    scrub_params :card_number   # stacks on top of parent's scrub list
+  end
+  ```
+
+- **`scrub_keys:` option on `plugin Easyop::Plugins::Recording`** — supply a list of extra keys/patterns to scrub at plugin install time. Inherited by all classes that share the same `plugin` declaration.
+
+  ```ruby
+  plugin Easyop::Plugins::Recording,
+         model: OperationLog,
+         scrub_keys: [:stripe_token, /secret/i]
+  ```
+
+- **`Easyop::Configuration#recording_scrub_keys`** — new global config key. Set once at boot and every recorded operation will scrub these keys in addition to `SCRUBBED_KEYS` and any class-level declarations. Accepts `Symbol`, `String`, or `Regexp`.
+
+  ```ruby
+  Easyop.configure do |c|
+    c.recording_scrub_keys = [:api_token, /token/i]
+  end
+  ```
+
+  **Scrub precedence (all layers are additive):**
+  1. `SCRUBBED_KEYS` — always applied (built-in list)
+  2. `Easyop.config.recording_scrub_keys` — global config
+  3. `scrub_keys:` plugin option + `scrub_params` DSL — class hierarchy
+
 ## [0.1.4] — 2026-04-14
 
 ### Added
@@ -258,6 +295,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/easyop_test_app/` — full Rails 8 blog application demonstrating all features in real-world code
 - `examples/usage.rb` — 13 runnable plain-Ruby examples
 
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/pniemczyk/easyop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pniemczyk/easyop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pniemczyk/easyop/compare/v0.1.2...v0.1.3

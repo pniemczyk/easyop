@@ -12,7 +12,7 @@
 <aside class="sidebar">
   <div class="sidebar-header">
     <a href="index.html" class="sidebar-logo">EasyOp</a>
-    <span class="sidebar-version">v0.1.4</span>
+    <span class="sidebar-version">v0.1.5</span>
   </div>
   <nav class="sidebar-nav">
     <div class="nav-group">
@@ -181,6 +181,7 @@ end</code></pre>
           <tr><td><code>model:</code></td><td>required</td><td>ActiveRecord class to write records into</td></tr>
           <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Set <code>false</code> to skip params_data serialization</td></tr>
           <tr><td><code>record_result:</code></td><td><code>nil</code></td><td>Plugin-level default for result capture (Hash/Proc/Symbol — see below)</td></tr>
+          <tr><td><code>scrub_keys:</code></td><td><code>[]</code></td><td>Extra keys/patterns to scrub from <code>params_data</code> (Symbol, String, or Regexp) — additive with built-in list</td></tr>
         </tbody>
       </table>
 
@@ -278,8 +279,21 @@ plugin Easyop::Plugins::Recording, model: OperationLog,
       <p>Class-level <code>record_result</code> overrides the plugin-level default. Missing ctx keys produce <code>nil</code> — no error. ActiveRecord objects → <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>. Serialization errors are swallowed. The <code>result_data</code> column is silently skipped when absent from the model table — fully backward-compatible.</p>
 
       <h3>Scrubbed keys</h3>
-      <p>These keys are never written to <code>params_data</code>: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code>. Internal tracing keys (<code>__recording_*</code>) are also excluded.</p>
-      <p>ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code> rather than their full representation.</p>
+      <p>All scrub layers are <strong>additive</strong> — none replaces the built-in list:</p>
+      <ol>
+        <li><strong>Built-in <code>SCRUBBED_KEYS</code></strong> — always applied: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code></li>
+        <li><strong>Global config</strong> — <code>Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }</code></li>
+        <li><strong><code>scrub_keys:</code> plugin option</strong> — <code>plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]</code></li>
+        <li><strong><code>scrub_params</code> DSL</strong> — per-class, inheritable, stackable: <code>scrub_params :card_number, /access.?key/i</code></li>
+      </ol>
+      <pre><code class="language-ruby">class ApplicationOperation &lt; ...
+  scrub_params :api_token, /secret/i
+end
+
+class Payments::ChargeCard &lt; ApplicationOperation
+  scrub_params :card_number  # stacks on top of parent's list
+end</code></pre>
+      <p>Internal tracing keys (<code>__recording_*</code>) are always excluded from <code>params_data</code>. ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>.</p>
 
       <h3>Opting out</h3>
       <pre><code class="language-ruby"># Disable recording for this class only:
@@ -849,7 +863,7 @@ end</code></pre>
 end</code></pre>
 
       <footer>
-        EasyOp v0.1.4 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.1.5 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>

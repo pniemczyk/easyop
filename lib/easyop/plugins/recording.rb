@@ -38,8 +38,10 @@ module Easyop
     #   model:         (required) ActiveRecord class
     #   record_params: true       pass false to skip params serialization
     #   record_result: nil        configure result capture at plugin level (Hash/Proc/Symbol)
+    #   scrub_keys:    []         additional keys/patterns to scrub from params_data
+    #                             (Symbol, String, or Regexp — additive with SCRUBBED_KEYS)
     module Recording
-      # Sensitive keys scrubbed from params_data before persisting.
+      # Sensitive keys always scrubbed from params_data before persisting.
       SCRUBBED_KEYS = %i[password password_confirmation token secret api_key].freeze
 
       # Internal ctx keys used for flow tracing — excluded from params_data.
@@ -49,12 +51,13 @@ module Easyop
         __recording_parent_reference_id
       ].freeze
 
-      def self.install(base, model:, record_params: true, record_result: nil, **_options)
+      def self.install(base, model:, record_params: true, record_result: nil, scrub_keys: [], **_options)
         base.extend(ClassMethods)
         base.prepend(RunWrapper)
         base.instance_variable_set(:@_recording_model,         model)
         base.instance_variable_set(:@_recording_record_params,  record_params)
         base.instance_variable_set(:@_recording_record_result,  record_result)
+        base.instance_variable_set(:@_recording_scrub_keys,     Array(scrub_keys))
       end
 
       module ClassMethods
@@ -108,6 +111,32 @@ module Easyop
           else
             nil
           end
+        end
+
+        # DSL to declare additional keys/patterns to scrub from params_data.
+        # Accepts Symbol, String, or Regexp. Additive with SCRUBBED_KEYS and
+        # any scrub_keys declared on parent classes or at the plugin install level.
+        #
+        # @example
+        #   class ApplicationOperation < ...
+        #     scrub_params :api_token, /access.?key/i
+        #   end
+        def scrub_params(*keys)
+          @_recording_scrub_keys = _own_recording_scrub_keys + keys
+        end
+
+        # Returns the merged scrub list: parent class keys + this class's own keys.
+        # Does NOT include SCRUBBED_KEYS or the global config list — those are
+        # merged at persist time so they stay hot-reloadable.
+        def _recording_scrub_keys
+          parent = superclass.respond_to?(:_recording_scrub_keys) ? superclass._recording_scrub_keys : []
+          parent + _own_recording_scrub_keys
+        end
+
+        private
+
+        def _own_recording_scrub_keys
+          instance_variable_defined?(:@_recording_scrub_keys) ? @_recording_scrub_keys : []
         end
       end
 
@@ -182,12 +211,33 @@ module Easyop
         end
 
         def _recording_safe_params(ctx)
+          # Merge all scrub layers (additive, never replaces built-ins):
+          #   1. SCRUBBED_KEYS          — built-in sensitive keys, always applied
+          #   2. Easyop.config          — global extra keys set in an initializer
+          #   3. self.class             — plugin install scrub_keys: + class scrub_params DSL
+          extra = Easyop.config.recording_scrub_keys.to_a + self.class._recording_scrub_keys
           ctx.to_h
-             .except(*SCRUBBED_KEYS, *INTERNAL_CTX_KEYS)
+             .except(*INTERNAL_CTX_KEYS)
+             .reject { |k, _| _recording_scrub_key?(k, extra) }
              .transform_values { |v| v.is_a?(ActiveRecord::Base) ? { id: v.id, class: v.class.name } : v }
              .to_json
         rescue
           nil
+        end
+
+        # Returns true when +key+ matches any entry in +scrub_list+.
+        # Regexp entries match against the stringified key name (case-sensitive
+        # unless the Regexp itself uses /i). Symbol/String entries match by value.
+        def _recording_scrub_key?(key, extra_list)
+          return true if SCRUBBED_KEYS.include?(key.to_sym)
+
+          extra_list.any? do |pattern|
+            case pattern
+            when Regexp then pattern.match?(key.to_s)
+            when Symbol then pattern == key.to_sym
+            else             pattern.to_s == key.to_s
+            end
+          end
         end
 
         def _recording_safe_result(ctx)

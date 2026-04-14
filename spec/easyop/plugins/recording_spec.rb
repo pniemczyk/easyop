@@ -261,6 +261,195 @@ RSpec.describe Easyop::Plugins::Recording do
     end
   end
 
+  # ── custom scrub_keys ────────────────────────────────────────────────────────
+
+  describe "custom scrub_keys" do
+    let(:model) { fake_model }
+
+    def call_op(op, **attrs)
+      op.call(**attrs)
+      JSON.parse(model.records.last[:params_data])
+    end
+
+    context "plugin install scrub_keys: [:api_token]" do
+      let(:op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubInstallOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m, scrub_keys: [:api_token])
+        end
+      end
+
+      it "scrubs the declared Symbol key" do
+        data = call_op(op, name: "Alice", api_token: "tok_123")
+        expect(data).not_to have_key("api_token")
+      end
+
+      it "keeps other non-sensitive keys" do
+        data = call_op(op, name: "Alice", api_token: "tok_123")
+        expect(data["name"]).to eq("Alice")
+      end
+
+      it "still scrubs built-in SCRUBBED_KEYS" do
+        data = call_op(op, name: "Alice", password: "s3cr3t", api_token: "tok")
+        expect(data).not_to have_key("password")
+      end
+    end
+
+    context "plugin install scrub_keys: [/token/i] (Regexp)" do
+      let(:op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubRegexpInstallOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m, scrub_keys: [/token/i])
+        end
+      end
+
+      it "scrubs keys matching the regexp (exact)" do
+        data = call_op(op, auth_token: "abc")
+        expect(data).not_to have_key("auth_token")
+      end
+
+      it "scrubs keys matching the regexp (case-insensitive)" do
+        data = call_op(op, authTOKEN: "abc")
+        expect(data).not_to have_key("authTOKEN")
+      end
+
+      it "keeps keys that do not match" do
+        data = call_op(op, name: "Alice")
+        expect(data["name"]).to eq("Alice")
+      end
+    end
+
+    context "class-level scrub_params DSL" do
+      let(:op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubDslOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m)
+          klass.scrub_params(:session_id, /private/i)
+        end
+      end
+
+      it "scrubs a Symbol key declared with scrub_params" do
+        data = call_op(op, session_id: "sess_abc", name: "Alice")
+        expect(data).not_to have_key("session_id")
+      end
+
+      it "scrubs keys matching a Regexp declared with scrub_params" do
+        data = call_op(op, private_note: "internal", name: "Alice")
+        expect(data).not_to have_key("private_note")
+      end
+
+      it "keeps other keys" do
+        data = call_op(op, session_id: "s", name: "Alice")
+        expect(data["name"]).to eq("Alice")
+      end
+    end
+
+    context "scrub_params is inherited and additive" do
+      let(:base_op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubBaseOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m)
+          klass.scrub_params(:base_secret)
+        end
+      end
+
+      let(:child_op) do
+        parent = base_op
+        Class.new(parent).tap do |klass|
+          stub_const("ScrubChildOp", klass)
+          klass.scrub_params(:child_secret)
+        end
+      end
+
+      it "child scrubs its own declared key" do
+        data = call_op(child_op, child_secret: "x", name: "Alice")
+        expect(data).not_to have_key("child_secret")
+      end
+
+      it "child also scrubs the parent's declared key" do
+        data = call_op(child_op, base_secret: "x", name: "Alice")
+        expect(data).not_to have_key("base_secret")
+      end
+
+      it "parent does not scrub child-only key" do
+        call_op(base_op, child_secret: "x", name: "Alice")
+        # base_op has no child_secret rule — key kept
+        expect(model.records.last).to be_a(Object) # just verifying no crash
+        data = JSON.parse(model.records.last[:params_data])
+        expect(data["child_secret"]).to eq("x")
+      end
+    end
+
+    context "global Easyop.config.recording_scrub_keys" do
+      before { Easyop.configure { |c| c.recording_scrub_keys = [:global_secret, /access.?key/i] } }
+
+      let(:op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubGlobalOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m)
+        end
+      end
+
+      it "scrubs a Symbol from the global list" do
+        data = call_op(op, global_secret: "x", name: "Alice")
+        expect(data).not_to have_key("global_secret")
+      end
+
+      it "scrubs keys matching a global Regexp" do
+        data = call_op(op, access_key: "k", name: "Alice")
+        expect(data).not_to have_key("access_key")
+      end
+
+      it "still scrubs built-in SCRUBBED_KEYS" do
+        data = call_op(op, password: "s3cr3t", global_secret: "x")
+        expect(data).not_to have_key("password")
+      end
+
+      it "keeps non-matching keys" do
+        data = call_op(op, name: "Alice", global_secret: "x")
+        expect(data["name"]).to eq("Alice")
+      end
+    end
+
+    context "all three layers are additive" do
+      before { Easyop.configure { |c| c.recording_scrub_keys = [:global_key] } }
+
+      let(:op) do
+        m = model
+        make_op { def call; end }.tap do |klass|
+          stub_const("ScrubAllLayersOp", klass)
+          klass.plugin(Easyop::Plugins::Recording, model: m, scrub_keys: [:install_key])
+          klass.scrub_params(:class_key)
+        end
+      end
+
+      it "scrubs built-in SCRUBBED_KEYS" do
+        data = call_op(op, password: "x")
+        expect(data).not_to have_key("password")
+      end
+
+      it "scrubs global config key" do
+        data = call_op(op, global_key: "x")
+        expect(data).not_to have_key("global_key")
+      end
+
+      it "scrubs plugin install key" do
+        data = call_op(op, install_key: "x")
+        expect(data).not_to have_key("install_key")
+      end
+
+      it "scrubs class DSL key" do
+        data = call_op(op, class_key: "x")
+        expect(data).not_to have_key("class_key")
+      end
+    end
+  end
+
   # ── ActiveRecord objects in ctx ──────────────────────────────────────────────
 
   describe "ActiveRecord objects are serialized in params_data" do
