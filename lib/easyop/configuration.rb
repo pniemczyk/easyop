@@ -15,19 +15,20 @@ module Easyop
     #   Easyop.configure { |c| c.event_bus = :active_support }
     attr_accessor :event_bus
 
-    # Extra keys to scrub from params_data across all recorded operations.
-    # Appended to Recording::SCRUBBED_KEYS — never replaces the built-in list.
+    # Extra keys to filter from params_data across all recorded operations.
+    # Appended to Recording::FILTERED_KEYS — never replaces the built-in list.
+    # Matched keys are kept in params_data but their value is replaced with "[FILTERED]".
     # Accepts Symbol, String, or Regexp (matched against the stringified key name).
     #
     # @example
-    #   Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }
-    attr_accessor :recording_scrub_keys
+    #   Easyop.configure { |c| c.recording_filter_keys = [:api_token, /token/i] }
+    attr_accessor :recording_filter_keys
 
     def initialize
-      @type_adapter         = :native
-      @strict_types         = false
-      @event_bus            = nil  # nil = Memory bus (see Easyop::Events::Registry)
-      @recording_scrub_keys = []
+      @type_adapter          = :native
+      @strict_types          = false
+      @event_bus             = nil  # nil = Memory bus (see Easyop::Events::Registry)
+      @recording_filter_keys = []
     end
   end
 

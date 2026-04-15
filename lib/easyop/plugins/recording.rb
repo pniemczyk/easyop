@@ -29,6 +29,9 @@ module Easyop
     # Optional result column:
     #   result_data           :text     # stored as JSON — selected ctx keys after call
     #
+    # Optional execution order column:
+    #   execution_index       :integer  # nil for root; 1-based within each parent
+    #
     # Opt out per operation class:
     #   class MyOp < ApplicationOperation
     #     recording false
@@ -36,28 +39,34 @@ module Easyop
     #
     # Options:
     #   model:         (required) ActiveRecord class
-    #   record_params: true       pass false to skip params serialization
-    #   record_result: nil        configure result capture at plugin level (Hash/Proc/Symbol)
-    #   scrub_keys:    []         additional keys/patterns to scrub from params_data
-    #                             (Symbol, String, or Regexp — additive with SCRUBBED_KEYS)
+    #   record_params: true       pass false to skip params serialization; also accepts
+    #                             Hash ({ attrs: :key }), Proc, or Symbol (method name)
+    #   record_result: false      configure result capture at plugin level; also accepts
+    #                             true (full ctx snapshot), Hash, Proc, or Symbol
+    #   filter_keys:   []         additional keys/patterns to filter from params_data
+    #                             (Symbol, String, or Regexp — additive with FILTERED_KEYS)
+    #                             Filtered keys are kept in params_data but their value
+    #                             is replaced with "[FILTERED]".
     module Recording
-      # Sensitive keys always scrubbed from params_data before persisting.
-      SCRUBBED_KEYS = %i[password password_confirmation token secret api_key].freeze
+      # Sensitive keys always filtered in params_data before persisting.
+      # Their values are replaced with "[FILTERED]" rather than removed.
+      FILTERED_KEYS = %i[password password_confirmation token secret api_key].freeze
 
       # Internal ctx keys used for flow tracing — excluded from params_data.
       INTERNAL_CTX_KEYS = %i[
         __recording_root_reference_id
         __recording_parent_operation_name
         __recording_parent_reference_id
+        __recording_child_counts
       ].freeze
 
-      def self.install(base, model:, record_params: true, record_result: nil, scrub_keys: [], **_options)
+      def self.install(base, model:, record_params: true, record_result: false, filter_keys: [], **_options)
         base.extend(ClassMethods)
         base.prepend(RunWrapper)
-        base.instance_variable_set(:@_recording_model,         model)
+        base.instance_variable_set(:@_recording_model,          model)
         base.instance_variable_set(:@_recording_record_params,  record_params)
         base.instance_variable_set(:@_recording_record_result,  record_result)
-        base.instance_variable_set(:@_recording_scrub_keys,     Array(scrub_keys))
+        base.instance_variable_set(:@_recording_filter_keys,    Array(filter_keys))
       end
 
       module ClassMethods
@@ -76,30 +85,48 @@ module Easyop
             (superclass.respond_to?(:_recording_model) ? superclass._recording_model : nil)
         end
 
-        def _recording_record_params?
-          if instance_variable_defined?(:@_recording_record_params)
-            @_recording_record_params
-          elsif superclass.respond_to?(:_recording_record_params?)
-            superclass._recording_record_params?
+        # DSL for controlling params capture. Forms:
+        #   record_params false           # disable params recording entirely
+        #   record_params true            # explicit full ctx (default)
+        #   record_params attrs: :key     # selective keys
+        #   record_params { |ctx| {...} } # block
+        #   record_params :build_params   # private method name
+        def record_params(value = nil, attrs: nil, &block)
+          @_recording_record_params = if block
+            block
+          elsif attrs
+            { attrs: attrs }
+          elsif !value.nil?
+            value
           else
             true
           end
         end
 
-        # DSL for capturing result data after the operation runs.
-        # Three forms:
-        #   record_result attrs: :key           # one or more ctx keys
-        #   record_result { |ctx| { k: ctx.k } } # block
-        #   record_result :build_result         # private instance method name
+        def _recording_record_params_config
+          if instance_variable_defined?(:@_recording_record_params)
+            @_recording_record_params
+          elsif superclass.respond_to?(:_recording_record_params_config)
+            superclass._recording_record_params_config
+          else
+            true
+          end
+        end
+
+        # DSL for capturing result data after the operation runs. Forms:
+        #   record_result true            # full ctx snapshot (FILTERED_KEYS applied)
+        #   record_result attrs: :key     # one or more ctx keys
+        #   record_result { |ctx| {...} } # block
+        #   record_result :build_result   # private instance method name
         def record_result(value = nil, attrs: nil, &block)
           @_recording_record_result = if block
             block
           elsif attrs
             { attrs: attrs }
-          elsif value.is_a?(Symbol)
+          elsif !value.nil?
             value
           else
-            value
+            nil
           end
         end
 
@@ -109,34 +136,35 @@ module Easyop
           elsif superclass.respond_to?(:_recording_record_result_config)
             superclass._recording_record_result_config
           else
-            nil
+            false
           end
         end
 
-        # DSL to declare additional keys/patterns to scrub from params_data.
-        # Accepts Symbol, String, or Regexp. Additive with SCRUBBED_KEYS and
-        # any scrub_keys declared on parent classes or at the plugin install level.
+        # DSL to declare additional keys/patterns to filter in params_data.
+        # Accepts Symbol, String, or Regexp. Additive with FILTERED_KEYS and
+        # any filter_keys declared on parent classes or at the plugin install level.
+        # Matched keys are kept in params_data but their value is replaced with "[FILTERED]".
         #
         # @example
         #   class ApplicationOperation < ...
-        #     scrub_params :api_token, /access.?key/i
+        #     filter_params :api_token, /access.?key/i
         #   end
-        def scrub_params(*keys)
-          @_recording_scrub_keys = _own_recording_scrub_keys + keys
+        def filter_params(*keys)
+          @_recording_filter_keys = _own_recording_filter_keys + keys
         end
 
-        # Returns the merged scrub list: parent class keys + this class's own keys.
-        # Does NOT include SCRUBBED_KEYS or the global config list — those are
+        # Returns the merged filter list: parent class keys + this class's own keys.
+        # Does NOT include FILTERED_KEYS or the global config list — those are
         # merged at persist time so they stay hot-reloadable.
-        def _recording_scrub_keys
-          parent = superclass.respond_to?(:_recording_scrub_keys) ? superclass._recording_scrub_keys : []
-          parent + _own_recording_scrub_keys
+        def _recording_filter_keys
+          parent = superclass.respond_to?(:_recording_filter_keys) ? superclass._recording_filter_keys : []
+          parent + _own_recording_filter_keys
         end
 
         private
 
-        def _own_recording_scrub_keys
-          instance_variable_defined?(:@_recording_scrub_keys) ? @_recording_scrub_keys : []
+        def _own_recording_filter_keys
+          instance_variable_defined?(:@_recording_filter_keys) ? @_recording_filter_keys : []
         end
       end
 
@@ -145,6 +173,12 @@ module Easyop
           return super unless self.class._recording_enabled?
           return super unless (model = self.class._recording_model)
           return super unless self.class.name # skip anonymous classes
+
+          # Snapshot the keys present in ctx RIGHT NOW — before any internal
+          # tracing keys are written and before the operation body runs. This
+          # lets _recording_safe_params emit only what was passed IN, not values
+          # computed during the call (those belong in result_data).
+          input_keys = ctx.to_h.keys
 
           # -- Flow tracing --
           # Each operation gets its own reference_id. The root_reference_id is
@@ -155,6 +189,14 @@ module Easyop
           # Read current parent context — these become THIS operation's parent fields.
           parent_operation_name = ctx[:__recording_parent_operation_name]
           parent_reference_id   = ctx[:__recording_parent_reference_id]
+
+          # Execution index: 1-based position among siblings (nil for root operations).
+          # Counts are tracked per-parent in a hash stored in ctx so sibling chains
+          # and nested sub-trees each maintain independent counters.
+          execution_index = if parent_reference_id
+            counts = ctx[:__recording_child_counts] ||= {}
+            counts[parent_reference_id] = (counts[parent_reference_id] || 0) + 1
+          end
 
           # Set THIS operation as the parent for any children that run inside super.
           # Save the previous values so we can restore them after (for siblings).
@@ -180,7 +222,9 @@ module Easyop
               root_reference_id:     root_reference_id,
               reference_id:          reference_id,
               parent_operation_name: parent_operation_name,
-              parent_reference_id:   parent_reference_id)
+              parent_reference_id:   parent_reference_id,
+              execution_index:       execution_index,
+              input_keys:            input_keys)
           end
         end
 
@@ -188,7 +232,8 @@ module Easyop
 
         def _recording_persist!(ctx, model, duration_ms,
                                 root_reference_id: nil, reference_id: nil,
-                                parent_operation_name: nil, parent_reference_id: nil)
+                                parent_operation_name: nil, parent_reference_id: nil,
+                                execution_index: nil, input_keys: nil)
           attrs = {
             operation_name:        self.class.name,
             success:               ctx.success?,
@@ -198,9 +243,11 @@ module Easyop
             root_reference_id:     root_reference_id,
             reference_id:          reference_id,
             parent_operation_name: parent_operation_name,
-            parent_reference_id:   parent_reference_id
+            parent_reference_id:   parent_reference_id,
+            execution_index:       execution_index
           }
-          attrs[:params_data] = _recording_safe_params(ctx) if self.class._recording_record_params?
+          params_config = self.class._recording_record_params_config
+          attrs[:params_data] = _recording_safe_params(ctx, params_config, input_keys) unless params_config == false
           attrs[:result_data] = _recording_safe_result(ctx) if self.class._recording_record_result_config
 
           # Only write columns the model actually has
@@ -210,26 +257,43 @@ module Easyop
           _recording_warn(e)
         end
 
-        def _recording_safe_params(ctx)
-          # Merge all scrub layers (additive, never replaces built-ins):
-          #   1. SCRUBBED_KEYS          — built-in sensitive keys, always applied
-          #   2. Easyop.config          — global extra keys set in an initializer
-          #   3. self.class             — plugin install scrub_keys: + class scrub_params DSL
-          extra = Easyop.config.recording_scrub_keys.to_a + self.class._recording_scrub_keys
-          ctx.to_h
-             .except(*INTERNAL_CTX_KEYS)
-             .reject { |k, _| _recording_scrub_key?(k, extra) }
-             .transform_values { |v| v.is_a?(ActiveRecord::Base) ? { id: v.id, class: v.class.name } : v }
-             .to_json
+        def _recording_safe_params(ctx, config, input_keys = nil)
+          raw = case config
+                when true
+                  # Restrict to keys that existed when the operation was invoked —
+                  # values computed during the call body are excluded here and
+                  # should be captured via record_result instead.
+                  # INTERNAL_CTX_KEYS are stripped from input_keys because nested
+                  # operations inherit parent tracing keys before their snapshot.
+                  base = ctx.to_h.except(*INTERNAL_CTX_KEYS)
+                  if input_keys
+                    clean = input_keys - INTERNAL_CTX_KEYS
+                    base.slice(*clean)
+                  else
+                    base
+                  end
+                when Hash
+                  keys = Array(config[:attrs])
+                  keys.each_with_object({}) { |k, h| h[k] = ctx[k] }
+                when Proc
+                  result = config.call(ctx)
+                  return nil unless result.is_a?(Hash)
+                  result
+                when Symbol
+                  result = send(config)
+                  return nil unless result.is_a?(Hash)
+                  result
+                end
+          _recording_apply_and_serialize(raw).to_json
         rescue
           nil
         end
 
-        # Returns true when +key+ matches any entry in +scrub_list+.
+        # Returns true when +key+ matches any entry in +filter_list+.
         # Regexp entries match against the stringified key name (case-sensitive
         # unless the Regexp itself uses /i). Symbol/String entries match by value.
-        def _recording_scrub_key?(key, extra_list)
-          return true if SCRUBBED_KEYS.include?(key.to_sym)
+        def _recording_filter_key?(key, extra_list)
+          return true if FILTERED_KEYS.include?(key.to_sym)
 
           extra_list.any? do |pattern|
             case pattern
@@ -245,21 +309,39 @@ module Easyop
           return nil unless config
 
           raw = case config
+                when true
+                  ctx.to_h.except(*INTERNAL_CTX_KEYS)
                 when Hash
                   keys = Array(config[:attrs])
                   keys.each_with_object({}) { |k, h| h[k] = ctx[k] }
                 when Proc
-                  config.call(ctx)
+                  result = config.call(ctx)
+                  return nil unless result.is_a?(Hash)
+                  result
                 when Symbol
-                  send(config)
+                  result = send(config)
+                  return nil unless result.is_a?(Hash)
+                  result
                 end
 
           return nil unless raw.is_a?(Hash)
-
-          raw.transform_values { |v| v.is_a?(ActiveRecord::Base) ? { id: v.id, class: v.class.name } : v }
-             .to_json
+          _recording_apply_and_serialize(raw).to_json
         rescue
           nil
+        end
+
+        # Applies FILTERED_KEYS + class/global filter lists to +hash+, replacing
+        # matched values with "[FILTERED]" and serializing ActiveRecord objects.
+        def _recording_apply_and_serialize(hash)
+          extra = Easyop.config.recording_filter_keys.to_a + self.class._recording_filter_keys
+          hash.each_with_object({}) do |(k, v), h|
+            h[k] = _recording_filter_key?(k, extra) ? '[FILTERED]' : _recording_serialize_value(v)
+          end
+        end
+
+        # Serializes a single value: AR objects become {id:, class:}, everything else passthrough.
+        def _recording_serialize_value(v)
+          v.is_a?(ActiveRecord::Base) ? { id: v.id, class: v.class.name } : v
         end
 
         def _recording_warn(err)

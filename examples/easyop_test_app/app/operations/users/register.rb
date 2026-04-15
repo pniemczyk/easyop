@@ -20,6 +20,15 @@ module Users
       required :user, User
     end
 
+    # params_data (automatic): records the INPUT keys — email, name,
+    #   newsletter_opt_in, password (replaced with [FILTERED]). The ctx.user
+    #   object created during #call is NOT in params_data.
+    #
+    # result_data: capture the full output ctx so auditors can see which User
+    #   was created (serialized as {id:, class:}) and all ctx values after the
+    #   call completes — the complement of params_data.
+    record_result true
+
     # Domain event: fired on successful registration so downstream handlers
     # (welcome emails, analytics, etc.) can react without coupling to this class.
     emits "user.registered", on: :success,

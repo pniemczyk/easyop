@@ -8,6 +8,9 @@ module Users
     # Read-only operation — no DB writes, no transaction needed
     transactional false
 
+    # Don't expose credentials in params_data — keep the audit trail but hide the inputs.
+    record_params false
+
     params do
       required :email,    :string
       required :password, :string

@@ -12,7 +12,7 @@
 <aside class="sidebar">
   <div class="sidebar-header">
     <a href="index.html" class="sidebar-logo">EasyOp</a>
-    <span class="sidebar-version">v0.1.5</span>
+    <span class="sidebar-version">v0.1.7</span>
   </div>
   <nav class="sidebar-nav">
     <div class="nav-group">
@@ -32,6 +32,7 @@
       <a href="plugins.html#instrumentation" style="padding-left:1.5rem;font-size:0.8rem">Instrumentation</a>
       <a href="plugins.html#recording" style="padding-left:1.5rem;font-size:0.8rem">Recording</a>
       <a href="plugins.html#flow-tracing" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Flow Tracing</a>
+      <a href="plugins.html#execution-index" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Execution Index</a>
       <a href="plugins.html#result-data" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Result Data</a>
       <a href="plugins.html#async" style="padding-left:1.5rem;font-size:0.8rem">Async</a>
       <a href="plugins.html#transactional" style="padding-left:1.5rem;font-size:0.8rem">Transactional</a>
@@ -179,9 +180,9 @@ end</code></pre>
         </thead>
         <tbody>
           <tr><td><code>model:</code></td><td>required</td><td>ActiveRecord class to write records into</td></tr>
-          <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Set <code>false</code> to skip params_data serialization</td></tr>
-          <tr><td><code>record_result:</code></td><td><code>nil</code></td><td>Plugin-level default for result capture (Hash/Proc/Symbol — see below)</td></tr>
-          <tr><td><code>scrub_keys:</code></td><td><code>[]</code></td><td>Extra keys/patterns to scrub from <code>params_data</code> (Symbol, String, or Regexp) — additive with built-in list</td></tr>
+          <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Control params serialization: <code>false</code> skips; <code>true</code> uses full ctx; also accepts <code>{ attrs: }</code>, Proc, or Symbol</td></tr>
+          <tr><td><code>record_result:</code></td><td><code>false</code></td><td>Plugin-level default for result capture: <code>false</code> skips; <code>true</code> uses full ctx; also accepts <code>{ attrs: }</code>, Proc, or Symbol</td></tr>
+          <tr><td><code>filter_keys:</code></td><td><code>[]</code></td><td>Extra keys/patterns to filter in <code>params_data</code> (Symbol, String, or Regexp) — values replaced with <code>[FILTERED]</code></td></tr>
         </tbody>
       </table>
 
@@ -190,13 +191,16 @@ end</code></pre>
   t.string   :operation_name, null: false
   t.boolean  :success,        null: false
   t.string   :error_message
-  t.text     :params_data         # JSON — ctx attrs with sensitive keys scrubbed
+  t.text     :params_data         # JSON — INPUT keys only; sensitive values replaced with [FILTERED]
   t.float    :duration_ms
   t.datetime :performed_at,   null: false
+
+  # Optional — add when using the record_result DSL to capture output data:
+  t.text     :result_data         # JSON — ctx snapshot after the call (computed values included)
 end</code></pre>
 
       <h3 id="flow-tracing">Flow Tracing (optional)</h3>
-      <p>Add four optional columns to reconstruct the full call tree when nested flows run. Missing columns are silently skipped — fully backward-compatible.</p>
+      <p>Add optional columns to reconstruct the full call tree when nested flows run. Missing columns are silently skipped — fully backward-compatible.</p>
 
       <pre><code class="language-ruby"># Migration to add flow tracing to an existing table:
 add_column :operation_logs, :root_reference_id,     :string
@@ -220,6 +224,26 @@ add_index :operation_logs, :parent_reference_id</code></pre>
         </tbody>
       </table>
 
+      <h3 id="execution-index">Execution Index (optional)</h3>
+      <p>Add an <code>execution_index</code> integer column to record the 1-based call order among siblings. Root operations store <code>nil</code>; each child's counter resets independently under its own parent — so two children of different parents can both be index 1.</p>
+
+      <pre><code class="language-ruby"># Migration to add execution order to an existing table:
+add_column :operation_logs, :execution_index, :integer
+
+# Composite index — fetch siblings in call order:
+add_index :operation_logs, [:parent_reference_id, :execution_index],
+          name: 'index_operation_logs_on_parent_ref_and_exec_index'</code></pre>
+
+      <div class="callout callout-tip">
+        <strong>Example tree with indices</strong>
+        <pre style="margin-top:0.5rem;background:none;padding:0">FullCheckout  (execution_index: nil — root)
+  ├─ ValidateCart    (execution_index: 1)
+  ├─ ApplyDiscount   (execution_index: 2)
+  │   ├─ LookupCode  (execution_index: 1)
+  │   └─ DeductAmt   (execution_index: 2)
+  └─ CreateOrder     (execution_index: 3)</pre>
+      </div>
+
       <p>A nested flow like <code>FullCheckout → AuthAndValidate → AuthenticateUser</code> produces one record per operation, all sharing the same <code>root_reference_id</code>, with <code>parent_*</code> fields linking each operation to its caller.</p>
 
       <p><code>Easyop::Flow</code> automatically forwards the parent-tracing ctx to child steps. For the <strong>flow itself to appear in the tree</strong> as the root entry, inherit from your recorded base class and add <code>transactional false</code> (so step-level transactions are not shadowed by an outer one):</p>
@@ -232,24 +256,61 @@ add_index :operation_logs, :parent_reference_id</code></pre>
 end
 
 # Result in operation_logs:
-# ProcessCheckout  root=aaa  ref=bbb  parent=nil
-#   ValidateCart   root=aaa  ref=ccc  parent=ProcessCheckout/bbb
-#   ChargePayment  root=aaa  ref=ddd  parent=ProcessCheckout/bbb
-#   CreateOrder    root=aaa  ref=eee  parent=ProcessCheckout/bbb</code></pre>
+# ProcessCheckout  root=aaa  ref=bbb  parent=nil         idx=nil
+#   ValidateCart   root=aaa  ref=ccc  parent=bbb   idx=1
+#   ChargePayment  root=aaa  ref=ddd  parent=bbb   idx=2
+#   CreateOrder    root=aaa  ref=eee  parent=bbb   idx=3</code></pre>
 
       <pre><code class="language-ruby"># Useful model scopes / methods:
-scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+scope :for_tree,    ->(id) { where(root_reference_id: id).order(:performed_at) }
+scope :children_of, ->(ref) { where(parent_reference_id: ref).order(:execution_index) }
 def root?; parent_reference_id.nil?; end
 
 # Fetch all logs for a given execution tree:
 root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference_id: nil)
-OperationLog.for_tree(root_log.root_reference_id)</code></pre>
+OperationLog.for_tree(root_log.root_reference_id)
+
+# Fetch direct children of a node in call order:
+OperationLog.children_of(root_log.reference_id)</code></pre>
+
+      <h3 id="record-params">Controlling params_data (<code>record_params</code>)</h3>
+      <p>By default, <code>params_data</code> records only the keys that were <strong>present in ctx when the operation was called</strong> (inputs). Values computed during the call body — like <code>ctx.user = User.create!(...)</code> — are excluded from <code>params_data</code> and should be captured with <code>record_result</code> instead. Use the <code>record_params</code> DSL to further customize or suppress params recording:</p>
+
+      <pre><code class="language-ruby"># Disable entirely — no params_data written
+class Users::Authenticate &lt; ApplicationOperation
+  record_params false
+end
+
+# Selective keys — only these ctx attrs are recorded
+class Tickets::GenerateTickets &lt; ApplicationOperation
+  record_params attrs: %i[event_id seat_count]
+end
+
+# Block — full control over the extracted hash
+class Reports::GeneratePdf &lt; ApplicationOperation
+  record_params { |ctx| { report_type: ctx.report_type, page_count: ctx.pages } }
+end
+
+# Symbol — delegates to a private method on the instance
+class Payments::ChargeCard &lt; ApplicationOperation
+  record_params :safe_params
+  private
+  def safe_params = { user_id: ctx.user.id, amount_cents: ctx.amount_cents }
+end</code></pre>
+
+      <p>FILTERED_KEYS are <strong>always applied</strong> to the extracted hash regardless of form. Plugin install-level <code>record_params:</code> accepts the same forms as the DSL.</p>
+      <div class="callout callout-tip"><strong>Input vs. output:</strong> The <code>true</code> (default) form records only keys present <em>before</em> the call body runs. Custom forms (attrs, block, symbol) are evaluated <em>after</em> the call, so they can access computed ctx values. Use <code>record_result</code> to capture output alongside inputs.</div>
 
       <h3 id="result-data">Result Data (optional)</h3>
-      <p>Add an optional <code>result_data :text</code> column to capture selected ctx output after the operation runs. Use the <code>record_result</code> DSL — three forms supported.</p>
+      <p>Add an optional <code>result_data :text</code> column to capture ctx output after the operation runs. Use the <code>record_result</code> DSL — four forms supported.</p>
 
       <pre><code class="language-ruby"># Migration:
 add_column :operation_logs, :result_data, :text  # stored as JSON
+
+# True form — full ctx snapshot (FILTERED_KEYS applied, internal keys excluded):
+class Users::Register &lt; ApplicationOperation
+  record_result true
+end
 
 # Attrs form — one or more ctx keys:
 class PlaceOrder &lt; ApplicationOperation
@@ -274,26 +335,29 @@ end
 
 # Plugin-level default — inherited by all subclasses, overridable per class:
 plugin Easyop::Plugins::Recording, model: OperationLog,
-       record_result: { attrs: :metadata }</code></pre>
+       record_result: true
+# or: record_result: { attrs: :metadata }
+# or: record_result: ->(ctx) { { id: ctx.record_id } }
+# or: record_result: :build_result</code></pre>
 
       <p>Class-level <code>record_result</code> overrides the plugin-level default. Missing ctx keys produce <code>nil</code> — no error. ActiveRecord objects → <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>. Serialization errors are swallowed. The <code>result_data</code> column is silently skipped when absent from the model table — fully backward-compatible.</p>
 
-      <h3>Scrubbed keys</h3>
-      <p>All scrub layers are <strong>additive</strong> — none replaces the built-in list:</p>
+      <h3>Filtered keys</h3>
+      <p>Sensitive keys are kept in <code>params_data</code> but their value is replaced with <code>"[FILTERED]"</code>, so audit logs show which fields were passed without exposing their values. All filter layers are <strong>additive</strong> — none replaces the built-in list:</p>
       <ol>
-        <li><strong>Built-in <code>SCRUBBED_KEYS</code></strong> — always applied: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code></li>
-        <li><strong>Global config</strong> — <code>Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }</code></li>
-        <li><strong><code>scrub_keys:</code> plugin option</strong> — <code>plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]</code></li>
-        <li><strong><code>scrub_params</code> DSL</strong> — per-class, inheritable, stackable: <code>scrub_params :card_number, /access.?key/i</code></li>
+        <li><strong>Built-in <code>FILTERED_KEYS</code></strong> — always applied: <code>:password</code>, <code>:password_confirmation</code>, <code>:token</code>, <code>:secret</code>, <code>:api_key</code></li>
+        <li><strong>Global config</strong> — <code>Easyop.configure { |c| c.recording_filter_keys = [:api_token, /token/i] }</code></li>
+        <li><strong><code>filter_keys:</code> plugin option</strong> — <code>plugin Easyop::Plugins::Recording, model: OperationLog, filter_keys: [:stripe_secret]</code></li>
+        <li><strong><code>filter_params</code> DSL</strong> — per-class, inheritable, stackable: <code>filter_params :card_number, /access.?key/i</code></li>
       </ol>
       <pre><code class="language-ruby">class ApplicationOperation &lt; ...
-  scrub_params :api_token, /secret/i
+  filter_params :api_token, /secret/i
 end
 
 class Payments::ChargeCard &lt; ApplicationOperation
-  scrub_params :card_number  # stacks on top of parent's list
+  filter_params :card_number  # stacks on top of parent's list
 end</code></pre>
-      <p>Internal tracing keys (<code>__recording_*</code>) are always excluded from <code>params_data</code>. ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>.</p>
+      <p>Internal tracing keys (<code>__recording_*</code>) are always fully removed from <code>params_data</code>. ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>.</p>
 
       <h3>Opting out</h3>
       <pre><code class="language-ruby"># Disable recording for this class only:
@@ -863,7 +927,7 @@ end</code></pre>
 end</code></pre>
 
       <footer>
-        EasyOp v0.1.5 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.1.7 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>

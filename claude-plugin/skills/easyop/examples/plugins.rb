@@ -70,7 +70,7 @@ end
 #     t.string   :operation_name, null: false
 #     t.boolean  :success,        null: false
 #     t.string   :error_message
-#     t.text     :params_data          # JSON — ctx attrs with sensitive keys scrubbed
+#     t.text     :params_data          # JSON — ctx attrs (sensitive keys replaced with [FILTERED])
 #     t.float    :duration_ms
 #     t.datetime :performed_at,   null: false
 #   end
@@ -84,32 +84,95 @@ end
 #   add_index  :operation_logs, :reference_id, unique: true
 #   add_index  :operation_logs, :parent_reference_id
 #
-# When these columns exist, nested flows are automatically linked:
+# Optional execution order column — 1-based index among siblings (nil for root):
+#   add_column :operation_logs, :execution_index, :integer
+#   add_index  :operation_logs, [:parent_reference_id, :execution_index],
+#              name: 'index_operation_logs_on_parent_ref_and_exec_index'
+#
+# When these columns exist, nested flows are automatically linked and ordered:
 #
 #   FullCheckout.call(...)
-#   #   root_reference_id: "aaa-..."  reference_id: "bbb-..."  parent: nil
+#   # root_reference_id: "aaa"  ref: "bbb"  parent: nil          idx: nil
 #     AuthAndValidate.call(...)
-#     #   root_reference_id: "aaa-..."  reference_id: "ccc-..."  parent: FullCheckout/"bbb-..."
+#     # root_reference_id: "aaa"  ref: "ccc"  parent: "bbb"  idx: 1
 #       AuthenticateUser.call(...)
-#       #   root_reference_id: "aaa-..."  reference_id: "ddd-..."  parent: AuthAndValidate/"ccc-..."
+#       # root_reference_id: "aaa"  ref: "ddd"  parent: "ccc"  idx: 1
 #     ProcessPayment.call(...)
-#     #   root_reference_id: "aaa-..."  reference_id: "eee-..."  parent: FullCheckout/"bbb-..."
+#     # root_reference_id: "aaa"  ref: "eee"  parent: "bbb"  idx: 2
+#
+# Each child's counter resets under its own parent — AuthenticateUser starts at 1
+# under AuthAndValidate even though AuthAndValidate itself is index 1 under FullCheckout.
 #
 # Useful model helpers:
-#   scope :for_tree, ->(id) { where(root_reference_id: id).order(:performed_at) }
+#   scope :for_tree,    ->(id)  { where(root_reference_id: id).order(:performed_at) }
+#   scope :children_of, ->(ref) { where(parent_reference_id: ref).order(:execution_index) }
 #   def root?; parent_reference_id.nil?; end
 #
 # Query the full execution tree for a given root:
 #   root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference_id: nil)
 #   OperationLog.for_tree(root_log.root_reference_id)
 #   # => all 4 records, oldest-first, showing the full call tree
+#
+#   # Direct children of FullCheckout in call order:
+#   OperationLog.children_of(root_log.reference_id)
+#   # => [AuthAndValidate (idx:1), ProcessPayment (idx:2)]
 
 # Optional result column — add when you want to capture output data:
 #   add_column :operation_logs, :result_data, :text  # stored as JSON
 
-# record_result DSL — three forms:
+# record_params DSL — four forms for controlling params_data:
 #
-# Form 1: attrs — one or more ctx keys
+# KEY BEHAVIOR: the default true form records only INPUT keys — the keys
+# present in ctx BEFORE the operation body runs. Values set during #call
+# (like ctx.user = User.create!(...)) are excluded from params_data and
+# should be captured via record_result instead.
+# Custom forms (attrs/block/symbol) are evaluated AFTER the call body, so
+# they can access computed values if explicitly requested.
+#
+# Form 1: false — disable params recording entirely
+class Users::Authenticate < ApplicationOperation
+  record_params false   # keeps the audit trail but hides auth inputs
+end
+
+# Form 2: attrs — only selected ctx keys
+class Tickets::GenerateTickets < ApplicationOperation
+  record_params attrs: %i[event_id seat_count]
+end
+
+# Form 3: block — full custom extraction
+class Reports::GeneratePdf < ApplicationOperation
+  record_params { |ctx| { report_type: ctx.report_type, page_count: ctx.pages } }
+end
+
+# Form 4: symbol — delegates to a private instance method
+class Payments::BuildPayload < ApplicationOperation
+  record_params :safe_params
+
+  private
+
+  def safe_params
+    { user_id: ctx.user.id, amount_cents: ctx.amount_cents }
+  end
+end
+
+# Plugin-level default — all subclasses inherit unless they declare their own:
+#   plugin Easyop::Plugins::Recording, model: OperationLog,
+#          record_params: { attrs: %i[user_id plan] }
+#   # also: record_params: ->(ctx) { { custom: ctx[:key] } }
+#   # also: record_params: :build_params
+#   # also: record_params: false  (disable for all)
+
+# IMPORTANT: FILTERED_KEYS are always applied to the final hash, regardless of form.
+# Even a custom block or attrs list — if it includes :password, it becomes "[FILTERED]".
+
+# record_result DSL — four forms for capturing output in result_data:
+#
+# Form 1: true — full ctx snapshot (FILTERED_KEYS applied, internal keys excluded)
+class Users::Register < ApplicationOperation
+  record_result true   # captures the full output ctx after registration
+end
+
+# Form 2: attrs — one or more ctx keys
 class PlaceOrder < ApplicationOperation
   record_result attrs: :order_id
 end
@@ -118,12 +181,12 @@ class ProcessPayment < ApplicationOperation
   record_result attrs: [:charge_id, :amount_cents]
 end
 
-# Form 2: block — custom extraction logic
+# Form 3: block — custom extraction logic
 class GenerateReport < ApplicationOperation
   record_result { |ctx| { rows: ctx.rows.count, format: ctx.format } }
 end
 
-# Form 3: symbol — delegates to a private instance method
+# Form 4: symbol — delegates to a private instance method
 class BuildInvoice < ApplicationOperation
   record_result :build_result
 
@@ -136,30 +199,34 @@ end
 
 # Plugin-level default — all subclasses inherit unless they declare their own record_result:
 #   plugin Easyop::Plugins::Recording, model: OperationLog,
-#          record_result: { attrs: :metadata }
-# Also accepts: record_result: ->(ctx) { { id: ctx.record_id } }
-#               record_result: :build_result
+#          record_result: true
+#   # also: record_result: { attrs: :metadata }
+#   # also: record_result: ->(ctx) { { id: ctx.record_id } }
+#   # also: record_result: :build_result
 
-# Scrubbing params — all layers are additive (built-in SCRUBBED_KEYS are always applied):
+# Filtering params — sensitive keys are kept in params_data but their value is
+# replaced with "[FILTERED]". All filter layers are additive (built-in FILTERED_KEYS
+# are always applied, and no layer replaces another):
 
 # Layer 1 — global config (applied to every recorded operation):
-Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }
+Easyop.configure { |c| c.recording_filter_keys = [:api_token, /token/i] }
 
 # Layer 2 — plugin install option (applied to all subclasses):
 class ApplicationOperation
   include Easyop::Operation
-  plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+  plugin Easyop::Plugins::Recording, model: OperationLog, filter_keys: [:stripe_secret]
 end
 
 # Layer 3 — class DSL (inherited + stackable):
 class ApplicationOperation
-  scrub_params :internal_ref, /access.?key/i
+  filter_params :internal_ref, /access.?key/i
 end
 
 class Payments::ChargeCard < ApplicationOperation
-  scrub_params :card_number   # stacks on top of ApplicationOperation's list
-  # Final scrub list for Payments::ChargeCard:
-  # SCRUBBED_KEYS + global config + :stripe_secret + :internal_ref + /access.?key/i + :card_number
+  filter_params :card_number   # stacks on top of ApplicationOperation's list
+  # Final filter list for Payments::ChargeCard:
+  # FILTERED_KEYS + global config + :stripe_secret + :internal_ref + /access.?key/i + :card_number
+  # All matched keys appear in params_data with value "[FILTERED]"
 end
 
 # Default: all ops are recorded. Opt out per class:
@@ -167,14 +234,9 @@ class Newsletter::SendBroadcast < ApplicationOperation
   recording false   # skip logging for this operation
 end
 
-# Disable params serialization for high-frequency or sensitive ops:
-class Users::TrackPageView < ApplicationOperation
-  plugin Easyop::Plugins::Recording, model: OperationLog, record_params: false
-end
-
-# Scrubbed keys (never appear in params_data):
+# Filtered keys (kept in params_data, value replaced with "[FILTERED]"):
 # :password, :password_confirmation, :token, :secret, :api_key
-# Internal tracing keys (__recording_*) are also excluded automatically.
+# Internal tracing keys (__recording_*) are fully removed from params_data.
 # ActiveRecord objects are serialized as { "id" => 42, "class" => "User" }
 
 # ── Flow + Recording: full call-tree tracing ──────────────────────────────────
@@ -192,19 +254,24 @@ class ProcessCheckout < ApplicationOperation
   flow ValidateCart, ChargePayment, CreateOrder
 end
 
-# Result in operation_logs (with flow-tracing columns present):
-#   ProcessCheckout   root=aaa  ref=bbb  parent=nil
-#     ValidateCart    root=aaa  ref=ccc  parent=ProcessCheckout/bbb
-#     ChargePayment   root=aaa  ref=ddd  parent=ProcessCheckout/bbb
-#     CreateOrder     root=aaa  ref=eee  parent=ProcessCheckout/bbb
+# Result in operation_logs (with flow-tracing + execution_index columns present):
+#   ProcessCheckout   root=aaa  ref=bbb  parent=nil         idx=nil
+#     ValidateCart    root=aaa  ref=ccc  parent=bbb   idx=1
+#     ChargePayment   root=aaa  ref=ddd  parent=bbb   idx=2
+#     CreateOrder     root=aaa  ref=eee  parent=bbb   idx=3
 #
 # Fetch the entire execution tree:
 #   root = OperationLog.find_by(operation_name: "ProcessCheckout", parent_reference_id: nil)
 #   OperationLog.for_tree(root.root_reference_id)
 #   # => 4 records, oldest-first, showing the full call tree
 #
+# Fetch direct children in call order:
+#   OperationLog.children_of(root.reference_id)
+#   # => [ValidateCart (idx:1), ChargePayment (idx:2), CreateOrder (idx:3)]
+#
 # Bare include Easyop::Flow (without inheriting ApplicationOperation) still works:
-# steps show parent_operation_name correctly, but the flow itself is not recorded.
+# steps show parent_operation_name and execution_index correctly,
+# but the flow itself is not recorded.
 
 # ── Plugin 3: Async ──────────────────────────────────────────────────────────
 

@@ -7,42 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-04-15
+
+### Added
+
+- **`execution_index` for `Easyop::Plugins::Recording`** — an optional `:integer` column that records the 1-based call order of each child operation within its parent. Root operations store `nil`. Each child's counter resets independently under its own parent, so siblings of different parents both start at `1`. Add via migration:
+
+  ```ruby
+  add_column :operation_logs, :execution_index, :integer
+  add_index  :operation_logs, [:parent_reference_id, :execution_index],
+             name: 'index_operation_logs_on_parent_ref_and_exec_index'
+  ```
+
+  Example tree:
+  ```
+  FullCheckout  (execution_index: nil — root)
+    ValidateCart    (execution_index: 1)
+    ApplyDiscount   (execution_index: 2)
+      LookupCode    (execution_index: 1)  ← resets under new parent
+      DeductAmt     (execution_index: 2)
+    CreateOrder     (execution_index: 3)
+  ```
+
+  The column is fully optional and backward-compatible — missing columns are silently skipped.
+
+## [0.1.6] — 2026-04-15
+
+### Added
+
+- **`record_result: true` form for `Easyop::Plugins::Recording`** — passing `true` at install time (or via the class-level `record_result true` DSL) now records the full ctx snapshot after the operation completes. `FILTERED_KEYS` are applied and `INTERNAL_CTX_KEYS` are excluded. The `true` form captures computed values set during `#call`, making it a full output snapshot.
+
+- **`record_params` class-level DSL** — parallel to `record_result`, operations can now declare params recording behaviour per-class:
+
+  ```ruby
+  record_params false                          # disable params recording entirely
+  record_params attrs: %i[email name]          # selective keys only
+  record_params { |ctx| { id: ctx.user_id } }  # block form
+  record_params :build_safe_params             # private method form
+  record_params true                           # explicit full ctx (default)
+  ```
+
+  Inherited through the class hierarchy; subclasses can override.
+
+- **`record_params:` install option extended** — the `plugin Easyop::Plugins::Recording, record_params:` option now accepts the same forms as the DSL: `false`, `true`, `{ attrs: }`, `Proc`, `Symbol`.
+
+- **Input-only `params_data` by default** — when `record_params` is `true` (the default), `params_data` now records only the keys that were present in `ctx` **before** the operation body ran. Computed values written during `#call` are excluded from `params_data`. Custom forms (attrs/block/symbol) are user-controlled and evaluated after the call, so they can access computed values.
+
+### Changed
+
+- **`record_result` default is now `false`** — previously defaulted to `nil` (falsy). Explicit `false` makes intent clear and prevents accidental result logging.
+
 ## [0.1.5] — 2026-04-14
 
 ### Added
 
-- **`scrub_params` DSL for `Easyop::Plugins::Recording`** — declare additional params keys/patterns to scrub from `params_data` on a per-class basis. Accepts `Symbol`, `String`, or `Regexp`. Additive with `SCRUBBED_KEYS` and never replaces the built-in list. Inherited by subclasses; any level of the hierarchy can override.
+- **`filter_params` DSL for `Easyop::Plugins::Recording`** — declare additional params keys/patterns to filter in `params_data` on a per-class basis. Matched keys are kept but their value is replaced with `"[FILTERED]"`. Accepts `Symbol`, `String`, or `Regexp`. Additive with `FILTERED_KEYS` and never replaces the built-in list. Inherited by subclasses; any level of the hierarchy can override.
 
   ```ruby
   class ApplicationOperation < ...
-    scrub_params :api_token, /access.?key/i
+    filter_params :api_token, /access.?key/i
   end
 
   class Orders::CreateOrder < ApplicationOperation
-    scrub_params :card_number   # stacks on top of parent's scrub list
+    filter_params :card_number   # stacks on top of parent's filter list
   end
   ```
 
-- **`scrub_keys:` option on `plugin Easyop::Plugins::Recording`** — supply a list of extra keys/patterns to scrub at plugin install time. Inherited by all classes that share the same `plugin` declaration.
+- **`filter_keys:` option on `plugin Easyop::Plugins::Recording`** — supply a list of extra keys/patterns to filter at plugin install time. Inherited by all classes that share the same `plugin` declaration.
 
   ```ruby
   plugin Easyop::Plugins::Recording,
          model: OperationLog,
-         scrub_keys: [:stripe_token, /secret/i]
+         filter_keys: [:stripe_token, /secret/i]
   ```
 
-- **`Easyop::Configuration#recording_scrub_keys`** — new global config key. Set once at boot and every recorded operation will scrub these keys in addition to `SCRUBBED_KEYS` and any class-level declarations. Accepts `Symbol`, `String`, or `Regexp`.
+- **`Easyop::Configuration#recording_filter_keys`** — new global config key. Set once at boot and every recorded operation will filter these keys in addition to `FILTERED_KEYS` and any class-level declarations. Accepts `Symbol`, `String`, or `Regexp`.
 
   ```ruby
   Easyop.configure do |c|
-    c.recording_scrub_keys = [:api_token, /token/i]
+    c.recording_filter_keys = [:api_token, /token/i]
   end
   ```
 
-  **Scrub precedence (all layers are additive):**
-  1. `SCRUBBED_KEYS` — always applied (built-in list)
-  2. `Easyop.config.recording_scrub_keys` — global config
-  3. `scrub_keys:` plugin option + `scrub_params` DSL — class hierarchy
+- **`[FILTERED]` value replacement** — sensitive keys are now kept in `params_data` with their value replaced by `"[FILTERED]"` instead of being removed entirely. This means audit logs show *which* sensitive fields were passed without exposing their values.
+
+  **Filter precedence (all layers are additive):**
+  1. `FILTERED_KEYS` — always applied (built-in list)
+  2. `Easyop.config.recording_filter_keys` — global config
+  3. `filter_keys:` plugin option + `filter_params` DSL — class hierarchy
+
+- **`params_data` records only input keys by default** — `params_data` now snapshots the ctx keys present *before* the operation body runs. Values computed during `#call` (e.g. `ctx.user = User.create!(...)`) are excluded from `params_data`; use `record_result` to capture them. Custom `record_params` forms (attrs, block, symbol) are evaluated *after* the call and can access computed values when explicitly requested. FILTERED_KEYS and INTERNAL_CTX_KEYS are always excluded.
+
+- **`record_result: true` form** — passing `true` records the full ctx snapshot (all non-internal keys, FILTERED_KEYS applied). Works at both the plugin install level and the class-level DSL.
+
+  ```ruby
+  # Plugin level — all operations inherit this default
+  plugin Easyop::Plugins::Recording, model: OperationLog, record_result: true
+
+  # Class level DSL
+  class Orders::CreateOrder < ApplicationOperation
+    record_result true
+  end
+  ```
+
+- **`record_params` class-level DSL** — parallel to `record_result`, `record_params` can now be declared on any class to control what ends up in `params_data`. Supports four forms:
+
+  ```ruby
+  record_params false                            # disable params entirely
+  record_params true                             # explicit full ctx (default)
+  record_params attrs: :user_id                  # selective keys
+  record_params attrs: [:user_id, :event_id]
+  record_params { |ctx| { custom: ctx[:name] } } # block
+  record_params :build_params                    # private method name
+  ```
+
+  FILTERED_KEYS are **always applied** to the extracted hash regardless of form (keys are kept, values replaced with `"[FILTERED]"`). Config is inheritable and overridable per subclass.
+
+- **`record_params:` install option extended** — the plugin install-level `record_params:` option now accepts the same forms as the DSL: `Hash` (`{ attrs: }` ), `Proc`, and `Symbol`, in addition to `true`/`false`.
+
+  ```ruby
+  plugin Easyop::Plugins::Recording,
+         model: OperationLog,
+         record_params: { attrs: %i[user_id plan] }
+  ```
+
+### Changed
+
+- **`record_result` default is now `false`** (was `nil`). Behaviour is identical — no `result_data` is written unless explicitly configured — but the default value is now consistent with the boolean-style `record_params: true` API convention.
 
 ## [0.1.4] — 2026-04-14
 
@@ -295,7 +386,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/easyop_test_app/` — full Rails 8 blog application demonstrating all features in real-world code
 - `examples/usage.rb` — 13 runnable plain-Ruby examples
 
-[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/pniemczyk/easyop/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/pniemczyk/easyop/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/pniemczyk/easyop/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/pniemczyk/easyop/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/pniemczyk/easyop/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/pniemczyk/easyop/compare/v0.1.2...v0.1.3

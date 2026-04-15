@@ -1,5 +1,8 @@
 module Tickets
   class GenerateTickets < ApplicationOperation
+    # Record only the keys relevant for the audit log — skip the full order object.
+    record_params attrs: %i[event_id seat_count]
+
     def call
       tickets = []
 

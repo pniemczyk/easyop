@@ -88,13 +88,13 @@ class PluginsRecordingTest < Minitest::Test
     assert_includes pd, 'alice'
   end
 
-  def test_scrubs_sensitive_keys_from_params_data
+  def test_filters_sensitive_keys_in_params_data
     op = named_op { }
     op.call(password: 'secret', token: 'tok', name: 'alice')
-    pd = model.records.first[:params_data]
-    refute_includes pd, 'secret'
-    refute_includes pd, 'tok'
-    assert_includes pd, 'alice'
+    data = JSON.parse(model.records.first[:params_data])
+    assert_equal '[FILTERED]', data['password']
+    assert_equal '[FILTERED]', data['token']
+    assert_equal 'alice', data['name']
   end
 
   def test_skips_params_data_when_record_params_false
@@ -163,6 +163,8 @@ class PluginsRecordingTest < Minitest::Test
     operation_name success error_message params_data duration_ms performed_at
     root_reference_id reference_id parent_operation_name parent_reference_id
   ].freeze
+
+  TRACING_WITH_INDEX_COLUMNS = (TRACING_COLUMNS + %w[execution_index]).freeze
 
   class TracingModel
     attr_reader :records
@@ -620,133 +622,825 @@ class PluginsRecordingTest < Minitest::Test
     assert_equal({ 'info' => 'child-value' }, data)
   end
 
-  # ── custom scrub_keys ─────────────────────────────────────────────────────────
+  # ── params_data records only INPUT keys (not computed results) ───────────────
 
-  def test_scrub_keys_plugin_install_symbol
+  def test_params_data_excludes_keys_computed_during_call
+    op = named_op { ctx.result_value = 'computed' }
+    op.call(name: 'Alice')
+    data = JSON.parse(model.records.first[:params_data])
+    assert data.key?('name'), 'input key :name must appear in params_data'
+    refute data.key?('result_value'), 'key set during call must NOT appear in params_data'
+  end
+
+  def test_params_data_includes_all_input_keys
+    op = named_op { ctx.extra = 'added' }
+    op.call(user_id: 42, action: 'create')
+    data = JSON.parse(model.records.first[:params_data])
+    assert_equal 42,       data['user_id']
+    assert_equal 'create', data['action']
+    refute data.key?('extra')
+  end
+
+  def test_params_data_still_filters_sensitive_input_keys
+    op = named_op { }
+    op.call(email: 'a@b.com', password: 's3cr3t')
+    data = JSON.parse(model.records.first[:params_data])
+    assert_equal 'a@b.com',    data['email']
+    assert_equal '[FILTERED]', data['password']
+  end
+
+  def test_params_data_excludes_internal_ctx_keys_in_nested_op
+    m = model
+    child = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; end
+    end
+    set_const('InputNestedChildMT', child)
+
+    parent_flow = Class.new { include Easyop::Flow }
+    parent_flow.flow(child)
+    set_const('InputNestedFlowMT', parent_flow)
+
+    parent_flow.call(name: 'test')
+    data = JSON.parse(m.records.first[:params_data])
+    data.each_key { |k| refute k.start_with?('__recording_'), "leaked internal key: #{k}" }
+    assert_equal 'test', data['name']
+  end
+
+  def test_params_data_attrs_form_can_include_computed_keys
     m = model
     op = Class.new do
       include Easyop::Operation
-      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [:api_token]
+      plugin Easyop::Plugins::Recording, model: m
+      record_params attrs: :computed_result
+      def call; ctx.computed_result = 'output'; end
+    end
+    set_const('InputAttrsComputedMT', op)
+    op.call(name: 'Alice')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 'output', data['computed_result']
+    refute data.key?('name')
+  end
+
+  def test_params_data_block_form_can_include_computed_keys
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params { |c| { total: c[:total] } }
+      def call; ctx.total = 99; end
+    end
+    set_const('InputBlockComputedMT', op)
+    op.call(user_id: 1)
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 99, data['total']
+  end
+
+  def test_record_result_true_still_captures_computed_keys
+    m = FakeModel.new
+    result_cols = FakeModel::COLUMNS + %w[result_data]
+    m.define_singleton_method(:column_names) { result_cols }
+
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result true
+      def call; ctx.user = 'created_user'; end
+    end
+    set_const('InputResultFullMT', op)
+    op.call(email: 'a@b.com')
+    params = JSON.parse(m.records.first[:params_data])
+    result = JSON.parse(m.records.first[:result_data])
+    # params_data: only the input key
+    assert_equal ['email'], params.keys
+    # result_data: full ctx after execution — includes computed user
+    assert_equal 'created_user', result['user']
+    assert_equal 'a@b.com',      result['email']
+  end
+
+  # ── custom filter_keys ────────────────────────────────────────────────────────
+
+  def test_filter_keys_plugin_install_symbol
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, filter_keys: [:api_token]
       def call; end
     end
-    set_const('ScrubInstallMT', op)
+    set_const('FilterInstallMT', op)
     op.call(name: 'Alice', api_token: 'tok_123')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('api_token')
+    assert_equal '[FILTERED]', data['api_token']
     assert_equal 'Alice', data['name']
   end
 
-  def test_scrub_keys_plugin_install_regexp
+  def test_filter_keys_plugin_install_regexp
     m = model
     op = Class.new do
       include Easyop::Operation
-      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [/token/i]
+      plugin Easyop::Plugins::Recording, model: m, filter_keys: [/token/i]
       def call; end
     end
-    set_const('ScrubRegexpMT', op)
+    set_const('FilterRegexpMT', op)
     op.call(auth_token: 'abc', name: 'Bob')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('auth_token')
+    assert_equal '[FILTERED]', data['auth_token']
     assert_equal 'Bob', data['name']
   end
 
-  def test_scrub_params_class_dsl_symbol
+  def test_filter_params_class_dsl_symbol
     m = model
     op = Class.new do
       include Easyop::Operation
       plugin Easyop::Plugins::Recording, model: m
-      scrub_params :session_id
+      filter_params :session_id
       def call; end
     end
-    set_const('ScrubDslMT', op)
+    set_const('FilterDslMT', op)
     op.call(session_id: 'sess_xyz', name: 'Carol')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('session_id')
+    assert_equal '[FILTERED]', data['session_id']
     assert_equal 'Carol', data['name']
   end
 
-  def test_scrub_params_class_dsl_regexp
+  def test_filter_params_class_dsl_regexp
     m = model
     op = Class.new do
       include Easyop::Operation
       plugin Easyop::Plugins::Recording, model: m
-      scrub_params(/private/i)
+      filter_params(/private/i)
       def call; end
     end
-    set_const('ScrubDslRegexpMT', op)
+    set_const('FilterDslRegexpMT', op)
     op.call(private_note: 'internal', name: 'Dave')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('private_note')
+    assert_equal '[FILTERED]', data['private_note']
     assert_equal 'Dave', data['name']
   end
 
-  def test_scrub_params_inherited_additive
+  def test_filter_params_inherited_additive
     m = model
     base = Class.new do
       include Easyop::Operation
       plugin Easyop::Plugins::Recording, model: m
-      scrub_params :base_secret
+      filter_params :base_secret
       def call; end
     end
-    set_const('ScrubBaseMT', base)
+    set_const('FilterBaseMT', base)
     child = Class.new(base) do
-      scrub_params :child_secret
+      filter_params :child_secret
     end
-    set_const('ScrubChildMT', child)
+    set_const('FilterChildMT', child)
 
     child.call(base_secret: 'x', child_secret: 'y', name: 'Eve')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('base_secret'),  'base_secret should be scrubbed by child'
-    refute data.key?('child_secret'), 'child_secret should be scrubbed by child'
+    assert_equal '[FILTERED]', data['base_secret'],  'base_secret should be filtered by child'
+    assert_equal '[FILTERED]', data['child_secret'], 'child_secret should be filtered by child'
     assert_equal 'Eve', data['name']
   end
 
-  def test_scrub_keys_global_config_symbol
-    Easyop.configure { |c| c.recording_scrub_keys = [:global_secret] }
+  def test_filter_keys_global_config_symbol
+    Easyop.configure { |c| c.recording_filter_keys = [:global_secret] }
     m = model
     op = Class.new do
       include Easyop::Operation
       plugin Easyop::Plugins::Recording, model: m
       def call; end
     end
-    set_const('ScrubGlobalMT', op)
+    set_const('FilterGlobalMT', op)
     op.call(global_secret: 'x', name: 'Frank')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('global_secret')
+    assert_equal '[FILTERED]', data['global_secret']
     assert_equal 'Frank', data['name']
   end
 
-  def test_scrub_keys_global_config_regexp
-    Easyop.configure { |c| c.recording_scrub_keys = [/access.?key/i] }
+  def test_filter_keys_global_config_regexp
+    Easyop.configure { |c| c.recording_filter_keys = [/access.?key/i] }
     m = model
     op = Class.new do
       include Easyop::Operation
       plugin Easyop::Plugins::Recording, model: m
       def call; end
     end
-    set_const('ScrubGlobalRegexpMT', op)
+    set_const('FilterGlobalRegexpMT', op)
     op.call(access_key: 'k', name: 'Grace')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('access_key')
+    assert_equal '[FILTERED]', data['access_key']
     assert_equal 'Grace', data['name']
   end
 
-  def test_all_scrub_layers_are_additive
-    Easyop.configure { |c| c.recording_scrub_keys = [:global_key] }
+  def test_all_filter_layers_are_additive
+    Easyop.configure { |c| c.recording_filter_keys = [:global_key] }
     m = model
     op = Class.new do
       include Easyop::Operation
-      plugin Easyop::Plugins::Recording, model: m, scrub_keys: [:install_key]
-      scrub_params :class_key
+      plugin Easyop::Plugins::Recording, model: m, filter_keys: [:install_key]
+      filter_params :class_key
       def call; end
     end
-    set_const('ScrubAllLayersMT', op)
+    set_const('FilterAllLayersMT', op)
     op.call(password: 'p', global_key: 'g', install_key: 'i', class_key: 'c', name: 'Heidi')
     data = JSON.parse(m.records.last[:params_data])
-    refute data.key?('password'),    'built-in SCRUBBED_KEYS'
-    refute data.key?('global_key'),  'global config'
-    refute data.key?('install_key'), 'plugin install scrub_keys'
-    refute data.key?('class_key'),   'class scrub_params DSL'
+    assert_equal '[FILTERED]', data['password'],    'built-in FILTERED_KEYS'
+    assert_equal '[FILTERED]', data['global_key'],  'global config'
+    assert_equal '[FILTERED]', data['install_key'], 'plugin install filter_keys'
+    assert_equal '[FILTERED]', data['class_key'],   'class filter_params DSL'
     assert_equal 'Heidi', data['name']
+  end
+
+  # ── record_result: false (new default) ────────────────────────────────────────
+
+  def test_record_result_default_false_result_data_absent
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; ctx.info = 'x'; end
+    end
+    set_const('RrDefaultFalseMT', klass)
+    result_model.records.clear
+    klass.call
+    refute result_model.records.first.key?(:result_data)
+  end
+
+  def test_record_result_explicit_false_at_install_result_data_absent
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_result: false
+      def call; ctx.info = 'x'; end
+    end
+    set_const('RrFalseInstallMT', klass)
+    result_model.records.clear
+    klass.call
+    refute result_model.records.first.key?(:result_data)
+  end
+
+  # ── record_result: true — full ctx snapshot ───────────────────────────────────
+
+  def test_record_result_true_at_install_persists_full_ctx
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_result: true
+      def call; ctx.name = 'Alice'; ctx.score = 99; end
+    end
+    set_const('RrTrueInstallMT', klass)
+    result_model.records.clear
+    klass.call(name: 'Alice', score: 99)
+    data = JSON.parse(result_model.records.first[:result_data])
+    assert_equal 'Alice', data['name']
+    assert_equal 99, data['score']
+  end
+
+  def test_record_result_true_at_install_filters_sensitive_keys
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_result: true
+      def call; ctx.password = 's3cr3t'; ctx.name = 'Bob'; end
+    end
+    set_const('RrTrueInstallFilterMT', klass)
+    result_model.records.clear
+    klass.call(name: 'Bob', password: 's3cr3t')
+    data = JSON.parse(result_model.records.first[:result_data])
+    assert_equal '[FILTERED]', data['password']
+    assert_equal 'Bob', data['name']
+  end
+
+  def test_record_result_true_at_install_excludes_internal_ctx_keys
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_result: true
+      def call; end
+    end
+    set_const('RrTrueInstallInternalMT', klass)
+    result_model.records.clear
+    klass.call(name: 'test')
+    data = JSON.parse(result_model.records.first[:result_data])
+    data.each_key do |k|
+      refute k.start_with?('__recording_'), "result_data leaked internal key: #{k}"
+    end
+  end
+
+  def test_record_result_true_dsl_persists_full_ctx
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result true
+      def call; ctx.value = 42; end
+    end
+    set_const('RrTrueDslMT', klass)
+    result_model.records.clear
+    klass.call(value: 42)
+    data = JSON.parse(result_model.records.first[:result_data])
+    assert_equal 42, data['value']
+  end
+
+  def test_record_result_true_dsl_applies_filtered_keys
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result true
+      def call; ctx.token = 'tok'; ctx.user = 'Alice'; end
+    end
+    set_const('RrTrueDslFilterMT', klass)
+    result_model.records.clear
+    klass.call(user: 'Alice', token: 'tok')
+    data = JSON.parse(result_model.records.first[:result_data])
+    assert_equal '[FILTERED]', data['token']
+    assert_equal 'Alice', data['user']
+  end
+
+  def test_record_result_true_dsl_excludes_internal_keys
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result true
+      def call; end
+    end
+    set_const('RrTrueDslInternalMT', klass)
+    result_model.records.clear
+    klass.call(name: 'x')
+    data = JSON.parse(result_model.records.first[:result_data])
+    data.each_key do |k|
+      refute k.start_with?('__recording_'), "result_data leaked internal key: #{k}"
+    end
+  end
+
+  def test_record_result_true_inherited_by_child
+    m = result_model
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result true
+      def call; ctx.info = 'parent'; end
+    end
+    set_const('RrTrueInheritParentMT', parent)
+    child = Class.new(parent) do
+      def call; ctx.info = 'child'; end
+    end
+    set_const('RrTrueInheritChildMT', child)
+    result_model.records.clear
+    child.call
+    data = JSON.parse(result_model.records.last[:result_data])
+    assert_equal 'child', data['info']
+  end
+
+  def test_record_result_child_overrides_false_with_true
+    m = result_model
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      # default false — no record_result configured
+      def call; ctx.info = 'x'; end
+    end
+    set_const('RrFalseParentMT', parent)
+    child = Class.new(parent) do
+      record_result true
+      def call; ctx.info = 'child-result'; end
+    end
+    set_const('RrTrueChildMT', child)
+    result_model.records.clear
+    child.call
+    data = JSON.parse(result_model.records.last[:result_data])
+    assert_equal 'child-result', data['info']
+  end
+
+  # ── record_params DSL and install-level forms ─────────────────────────────────
+
+  def test_dot_record_params_install_hash_single_attr
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_params: { attrs: :name }
+      def call; end
+    end
+    set_const('RpInstallHashSingleMT', op)
+    op.call(name: 'Alice', password: 'secret')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal ['name'], data.keys
+    assert_equal 'Alice', data['name']
+  end
+
+  def test_dot_record_params_install_hash_multiple_attrs
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_params: { attrs: [:name, :email] }
+      def call; end
+    end
+    set_const('RpInstallHashMultiMT', op)
+    op.call(name: 'Alice', email: 'a@b.com', password: 'secret')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal %w[email name], data.keys.sort
+    assert_equal 'Alice', data['name']
+    assert_equal 'a@b.com', data['email']
+  end
+
+  def test_dot_record_params_install_proc
+    m = model
+    extractor = ->(c) { { custom: c[:name].upcase } }
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_params: extractor
+      def call; end
+    end
+    set_const('RpInstallProcMT', op)
+    op.call(name: 'alice')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal({ 'custom' => 'ALICE' }, data)
+  end
+
+  def test_dot_record_params_install_symbol
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, record_params: :build_params_method
+
+      def call; end
+
+      private
+
+      def build_params_method
+        { extracted: ctx[:name] }
+      end
+    end
+    set_const('RpInstallSymbolMT', op)
+    op.call(name: 'Bob')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal({ 'extracted' => 'Bob' }, data)
+  end
+
+  def test_dot_record_params_dsl_attrs_single_key
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params attrs: :email
+      def call; end
+    end
+    set_const('RpDslAttrsMT', op)
+    op.call(email: 'x@y.com', password: 's')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal ['email'], data.keys
+    assert_equal 'x@y.com', data['email']
+  end
+
+  def test_dot_record_params_dsl_block
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params { |c| { user: c[:name] } }
+      def call; end
+    end
+    set_const('RpDslBlockMT', op)
+    op.call(name: 'Charlie')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal({ 'user' => 'Charlie' }, data)
+  end
+
+  def test_dot_record_params_dsl_symbol
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params :safe_params_method
+
+      def call; end
+
+      private
+
+      def safe_params_method
+        { user_id: ctx[:id] }
+      end
+    end
+    set_const('RpDslSymbolMT', op)
+    op.call(id: 7, password: 'secret')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal({ 'user_id' => 7 }, data)
+  end
+
+  def test_dot_record_params_dsl_false_skips_params_data
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params false
+      def call; end
+    end
+    set_const('RpDslFalseMT', op)
+    op.call(name: 'Alice')
+    refute m.records.last.key?(:params_data)
+  end
+
+  def test_dot_record_params_dsl_true_writes_full_ctx
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params true
+      def call; end
+    end
+    set_const('RpDslTrueMT', op)
+    op.call(name: 'Alice', role: 'admin')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 'Alice', data['name']
+    assert_equal 'admin', data['role']
+  end
+
+  def test_dot_record_params_filtered_keys_apply_to_attrs_form
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params attrs: [:name, :password]
+      def call; end
+    end
+    set_const('RpAttrsFilterMT', op)
+    op.call(name: 'Alice', password: 's3cr3t')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 'Alice', data['name']
+    assert_equal '[FILTERED]', data['password']
+  end
+
+  def test_dot_record_params_filtered_keys_apply_to_block_form
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params { |c| { name: c[:name], token: c[:token] } }
+      def call; end
+    end
+    set_const('RpBlockFilterMT', op)
+    op.call(name: 'Alice', token: 'tok_abc')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 'Alice', data['name']
+    assert_equal '[FILTERED]', data['token']
+  end
+
+  def test_dot_record_params_filtered_keys_apply_to_symbol_form
+    m = model
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params :extract_params_method
+
+      def call; end
+
+      private
+
+      def extract_params_method
+        { name: ctx[:name], secret: ctx[:secret] }
+      end
+    end
+    set_const('RpSymbolFilterMT', op)
+    op.call(name: 'Alice', secret: 'shh')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal 'Alice', data['name']
+    assert_equal '[FILTERED]', data['secret']
+  end
+
+  def test_dot_record_params_config_inherited_by_child
+    m = model
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params attrs: :name
+      def call; end
+    end
+    set_const('RpInheritParentMT', parent)
+    child = Class.new(parent) do
+      def call; end
+    end
+    set_const('RpInheritChildMT', child)
+    child.call(name: 'Alice', email: 'a@b.com')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal ['name'], data.keys
+    assert_equal 'Alice', data['name']
+  end
+
+  def test_dot_record_params_child_overrides_parent_config
+    m = model
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_params attrs: :name
+      def call; end
+    end
+    set_const('RpOverrideParentMT', parent)
+    child = Class.new(parent) do
+      record_params attrs: :email
+      def call; end
+    end
+    set_const('RpOverrideChildMT', child)
+    child.call(name: 'Alice', email: 'a@b.com')
+    data = JSON.parse(m.records.last[:params_data])
+    assert_equal ['email'], data.keys
+    assert_equal 'a@b.com', data['email']
+    refute data.key?('name')
+  end
+
+  # ── execution_index helpers ───────────────────────────────────────────────────
+
+  class TracingWithIndexModel
+    attr_reader :records
+
+    def initialize
+      @records = []
+    end
+
+    def column_names
+      TRACING_WITH_INDEX_COLUMNS
+    end
+
+    def create!(attrs)
+      @records << attrs
+    end
+  end
+
+  def idx_model
+    @idx_model ||= TracingWithIndexModel.new
+  end
+
+  def named_idx_op(name, &call_block)
+    m = idx_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      define_method(:call, &call_block) if call_block
+    end
+    set_const(name, klass)
+    klass
+  end
+
+  def named_idx_flow(name, *steps)
+    m = idx_model
+    klass = Class.new { include Easyop::Flow; flow(*steps) }
+    klass.plugin(Easyop::Plugins::Recording, model: m)
+    set_const(name, klass)
+    klass
+  end
+
+  # ── execution_index: model without column ─────────────────────────────────────
+
+  def test_execution_index_omitted_when_model_lacks_column
+    op = named_tracing_op('ExIdxNoColMT') { }
+    tracing_model.records.clear
+    Object.const_get('ExIdxNoColMT').call
+    refute tracing_model.records.first.key?(:execution_index),
+           'execution_index must not appear when model lacks the column'
+  end
+
+  # ── execution_index: root operation ──────────────────────────────────────────
+
+  def test_execution_index_nil_for_standalone_root
+    named_idx_op('ExIdxRootMT') { }
+    idx_model.records.clear
+    Object.const_get('ExIdxRootMT').call
+    assert_nil idx_model.records.first[:execution_index]
+  end
+
+  # ── execution_index: two siblings ────────────────────────────────────────────
+
+  def test_execution_index_two_siblings_ordered_1_2
+    sa = named_idx_op('ExIdx2A') { }
+    sb = named_idx_op('ExIdx2B') { }
+    named_idx_flow('ExIdx2Flow', sa, sb)
+    idx_model.records.clear
+    Object.const_get('ExIdx2Flow').call
+
+    rec_a = idx_model.records.find { |r| r[:operation_name] == 'ExIdx2A' }
+    rec_b = idx_model.records.find { |r| r[:operation_name] == 'ExIdx2B' }
+    assert_equal 1, rec_a[:execution_index]
+    assert_equal 2, rec_b[:execution_index]
+  end
+
+  # ── execution_index: root flow has nil index ──────────────────────────────────
+
+  def test_execution_index_nil_for_root_flow
+    sa = named_idx_op('ExIdxFlowRootA') { }
+    named_idx_flow('ExIdxFlowRootFlow', sa)
+    idx_model.records.clear
+    Object.const_get('ExIdxFlowRootFlow').call
+    flow_rec = idx_model.records.find { |r| r[:operation_name] == 'ExIdxFlowRootFlow' }
+    assert_nil flow_rec[:execution_index]
+  end
+
+  # ── execution_index: three siblings ──────────────────────────────────────────
+
+  def test_execution_index_three_siblings_ordered_1_2_3
+    sa = named_idx_op('ExIdx3AMT') { }
+    sb = named_idx_op('ExIdx3BMT') { }
+    sc = named_idx_op('ExIdx3CMT') { }
+    named_idx_flow('ExIdx3FlowMT', sa, sb, sc)
+    idx_model.records.clear
+    Object.const_get('ExIdx3FlowMT').call
+
+    indices = %w[ExIdx3AMT ExIdx3BMT ExIdx3CMT].map do |n|
+      idx_model.records.find { |r| r[:operation_name] == n }[:execution_index]
+    end
+    assert_equal [1, 2, 3], indices
+  end
+
+  # ── execution_index: grandchildren reset under new parent ────────────────────
+  # Tree: Root > [B(1), C(2) > [D(1), E(2)], F(3)]
+
+  def test_execution_index_nested_flow_full_tree
+    mb = named_idx_op('ExIdxNstBMT') { }
+    md = named_idx_op('ExIdxNstDMT') { }
+    me = named_idx_op('ExIdxNstEMT') { }
+    mf = named_idx_op('ExIdxNstFMT') { }
+
+    inner_c = Class.new { include Easyop::Flow; flow md, me }
+    inner_c.plugin(Easyop::Plugins::Recording, model: idx_model)
+    set_const('ExIdxNstCMT', inner_c)
+
+    root_flow = Class.new { include Easyop::Flow; flow mb, inner_c, mf }
+    root_flow.plugin(Easyop::Plugins::Recording, model: idx_model)
+    set_const('ExIdxNstRootMT', root_flow)
+
+    idx_model.records.clear
+    root_flow.call
+
+    assert_nil idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstRootMT' }[:execution_index], 'Root index should be nil'
+    assert_equal 1, idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstBMT' }[:execution_index], 'B should be 1st child of Root'
+    assert_equal 2, idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstCMT' }[:execution_index], 'C should be 2nd child of Root'
+    assert_equal 3, idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstFMT' }[:execution_index], 'F should be 3rd child of Root'
+    assert_equal 1, idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstDMT' }[:execution_index], 'D should be 1st child of C'
+    assert_equal 2, idx_model.records.find { |r| r[:operation_name] == 'ExIdxNstEMT' }[:execution_index], 'E should be 2nd child of C'
+  end
+
+  # ── execution_index: bare flow (Recording not on flow) ───────────────────────
+
+  def test_execution_index_bare_flow_steps_get_correct_indices
+    m = idx_model
+    sa = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; end
+    end
+    set_const('ExIdxBareAMT', sa)
+
+    sb = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      def call; end
+    end
+    set_const('ExIdxBareBMT', sb)
+
+    bare = Class.new { include Easyop::Flow; flow sa, sb }
+    set_const('ExIdxBareFlowMT', bare)
+
+    idx_model.records.clear
+    bare.call
+
+    rec_a = idx_model.records.find { |r| r[:operation_name] == 'ExIdxBareAMT' }
+    rec_b = idx_model.records.find { |r| r[:operation_name] == 'ExIdxBareBMT' }
+    assert_equal 1, rec_a[:execution_index]
+    assert_equal 2, rec_b[:execution_index]
+  end
+
+  # ── execution_index: sibling with recording false skips slot ──────────────────
+
+  def test_execution_index_skips_slot_for_recording_false_sibling
+    sa = named_idx_op('ExIdxSkipAMT') { }
+    sb_klass = named_idx_op('ExIdxSkipBMT') { }
+    sb_klass.recording false
+    sc = named_idx_op('ExIdxSkipCMT') { }
+
+    named_idx_flow('ExIdxSkipFlowMT', sa, sb_klass, sc)
+    idx_model.records.clear
+    Object.const_get('ExIdxSkipFlowMT').call
+
+    rec_a = idx_model.records.find { |r| r[:operation_name] == 'ExIdxSkipAMT' }
+    rec_c = idx_model.records.find { |r| r[:operation_name] == 'ExIdxSkipCMT' }
+    assert_equal 1, rec_a[:execution_index], 'A should still be 1'
+    assert_equal 2, rec_c[:execution_index], 'C should be 2 (B slot skipped)'
+    refute idx_model.records.any? { |r| r[:operation_name] == 'ExIdxSkipBMT' }, 'B must not be recorded'
+  end
+
+  # ── execution_index: __recording_child_counts excluded from params_data ───────
+
+  def test_execution_index_child_counts_key_excluded_from_params_data
+    sa = named_idx_op('ExIdxLeakAMT') { }
+    sb = named_idx_op('ExIdxLeakBMT') { }
+    named_idx_flow('ExIdxLeakFlowMT', sa, sb)
+    idx_model.records.clear
+    Object.const_get('ExIdxLeakFlowMT').call
+
+    idx_model.records.each do |rec|
+      next unless rec[:params_data]
+      data = JSON.parse(rec[:params_data])
+      data.each_key do |k|
+        refute k.start_with?('__recording_'), "params_data leaked internal key: #{k}"
+      end
+    end
   end
 end

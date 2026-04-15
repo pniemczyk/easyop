@@ -72,9 +72,9 @@ end
 | Option | Default | |
 |---|---|---|
 | `model:` | required | ActiveRecord class |
-| `record_params:` | `true` | Set `false` to skip params serialization |
-| `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol) |
-| `scrub_keys:` | `[]` | Extra keys/patterns to scrub from `params_data` (Symbol, String, Regexp) |
+| `record_params:` | `true` | Control params serialization: `false` skips; `true` full ctx; also `{ attrs: }`, Proc, Symbol |
+| `record_result:` | `false` | Control result capture: `false` skips; `true` full ctx; also `{ attrs: }`, Proc, Symbol |
+| `filter_keys:` | `[]` | Extra keys/patterns to filter in `params_data` (Symbol, String, Regexp) — values replaced with `[FILTERED]` |
 
 **Required migration:**
 ```ruby
@@ -102,6 +102,27 @@ add_index :operation_logs, :parent_reference_id
 
 When present, all operations in one execution tree share the same `root_reference_id`. Parent/child relationships are captured via `parent_operation_name` and `parent_reference_id`. Missing columns are silently skipped (backward-compatible).
 
+**Optional execution order column** — records 1-based call order among siblings:
+```ruby
+add_column :operation_logs, :execution_index, :integer
+
+# Composite index for fetching children in call order:
+add_index :operation_logs, [:parent_reference_id, :execution_index],
+          name: 'index_operation_logs_on_parent_ref_and_exec_index'
+```
+
+Root operations store `nil`. Each child's counter resets independently under its own parent — two children of different parents can both be index 1.
+
+Example tree:
+```
+FullCheckout  (execution_index: nil)
+  ValidateCart    (execution_index: 1)
+  ApplyDiscount   (execution_index: 2)
+    LookupCode    (execution_index: 1)  ← resets under new parent
+    DeductAmt     (execution_index: 2)
+  CreateOrder     (execution_index: 3)
+```
+
 `Easyop::Flow` automatically forwards these ctx keys to child steps. For the flow itself to appear in the tree as the root entry, inherit from your recorded base class and add `transactional false`:
 
 ```ruby
@@ -118,11 +139,29 @@ end
 | `reference_id` | UUID unique to this operation execution |
 | `parent_operation_name` | Class name of the direct calling operation |
 | `parent_reference_id` | `reference_id` of the direct calling operation |
+| `execution_index` | 1-based call order among siblings (nil for root) |
+
+**`record_params` DSL** — control what ends up in `params_data`:
+
+```ruby
+record_params false                              # disable entirely
+record_params true                               # explicit full ctx (same as default)
+record_params attrs: %i[event_id seat_count]     # selective keys
+record_params { |ctx| { user: ctx[:name] } }     # block
+record_params :safe_params                        # private method name
+```
+
+FILTERED_KEYS are **always applied** regardless of form. Plugin install-level `record_params:` accepts the same forms.
+
+**Input-only default:** The `true` (default) form records only keys present *before* the call body runs — values computed during `#call` (like `ctx.user = User.create!(...)`) are excluded. Custom forms (attrs, block, symbol) are evaluated *after* the call, so they can access computed values. Use `record_result` to capture outputs.
 
 **`record_result` DSL** — persist selected ctx output to an optional `result_data :text` column (JSON):
 
 ```ruby
 add_column :operation_logs, :result_data, :text
+
+# True form — full ctx snapshot (FILTERED_KEYS applied, internal keys excluded):
+record_result true
 
 # Attrs form:
 record_result attrs: :order_id
@@ -136,35 +175,36 @@ record_result :build_result
 
 # Plugin-level default (inherited by all subclasses):
 plugin Easyop::Plugins::Recording, model: OperationLog,
-       record_result: { attrs: :metadata }
+       record_result: true
+# or: record_result: { attrs: :metadata }
 ```
 
 Class-level `record_result` overrides the plugin default. Missing ctx keys → `nil`. AR objects → `{ "id" => 42, "class" => "User" }`. Serialization errors are swallowed. Column silently skipped when absent (backward-compatible).
 
-**Scrubbed keys** — all layers are additive (none replaces the built-in list):
+**Filtered keys** — sensitive keys are kept in `params_data` but their value is replaced with `"[FILTERED]"`. All filter layers are additive (none replaces the built-in list):
 
-1. **Built-in `SCRUBBED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
-2. **Global config** — `Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }`
-3. **Plugin option** — `scrub_keys: [:stripe_token, /secret/i]` on `plugin ... Recording`
-4. **Class DSL** — `scrub_params :card_number, /access.?key/i` — inheritable, stackable per class
+1. **Built-in `FILTERED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+2. **Global config** — `Easyop.configure { |c| c.recording_filter_keys = [:api_token, /token/i] }`
+3. **Plugin option** — `filter_keys: [:stripe_token, /secret/i]` on `plugin ... Recording`
+4. **Class DSL** — `filter_params :card_number, /access.?key/i` — inheritable, stackable per class
 
 ```ruby
 # Global (initializer):
-Easyop.configure { |c| c.recording_scrub_keys = [:api_token] }
+Easyop.configure { |c| c.recording_filter_keys = [:api_token] }
 
 # Plugin install:
-plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+plugin Easyop::Plugins::Recording, model: OperationLog, filter_keys: [:stripe_secret]
 
 # Per class:
 class ApplicationOperation < ...
-  scrub_params :internal_token, /key/i
+  filter_params :internal_token, /key/i
 end
 class Orders::CreateOrder < ApplicationOperation
-  scrub_params :card_number   # stacks on top of parent's list
+  filter_params :card_number   # stacks on top of parent's list
 end
 ```
 
-Internal tracing keys (`__recording_*`) are always excluded from `params_data`.
+Internal tracing keys (`__recording_*`) are always fully removed from `params_data`.
 
 AR objects in ctx are serialized as `{ "id" => 42, "class" => "User" }`.
 

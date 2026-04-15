@@ -645,9 +645,9 @@ end
 | Option | Default | Description |
 |---|---|---|
 | `model:` | required | ActiveRecord class to write logs into |
-| `record_params:` | `true` | Set `false` to skip serializing ctx params |
-| `record_result:` | `nil` | Plugin-level default for result capture (Hash/Proc/Symbol — see below) |
-| `scrub_keys:` | `[]` | Extra keys/patterns to scrub from `params_data` (Symbol, String, Regexp) — additive with built-in list |
+| `record_params:` | `true` | Control params serialization: `false` skips it; `true` uses full ctx; also accepts `{ attrs: }`, `Proc`, or `Symbol` |
+| `record_result:` | `false` | Plugin-level default for result capture: `false` skips; `true` uses full ctx; also accepts `{ attrs: }`, `Proc`, or `Symbol` |
+| `filter_keys:` | `[]` | Extra keys/patterns to filter in `params_data` (Symbol, String, Regexp) — values replaced with `[FILTERED]` |
 
 **Required model columns:**
 
@@ -656,9 +656,12 @@ create_table :operation_logs do |t|
   t.string   :operation_name, null: false
   t.boolean  :success,        null: false
   t.string   :error_message
-  t.text     :params_data          # JSON — ctx attrs (sensitive keys scrubbed)
+  t.text     :params_data          # JSON — ctx attrs (sensitive keys replaced with [FILTERED])
   t.float    :duration_ms
   t.datetime :performed_at,   null: false
+
+  # Optional — add when using the record_result DSL to capture output data:
+  t.text     :result_data          # JSON — selected ctx keys after the operation runs
 end
 ```
 
@@ -697,28 +700,65 @@ root_log = OperationLog.find_by(operation_name: "FullCheckout", parent_reference
 OperationLog.for_tree(root_log.root_reference_id)
 ```
 
-**Scrubbing params** — all layers are additive (none replaces the built-in list):
+**Filtering params** — sensitive keys are kept in `params_data` but their value is replaced with `"[FILTERED]"`, so the audit log shows which fields were passed without exposing their values. All layers are additive:
 
-1. **Built-in `SCRUBBED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
+1. **Built-in `FILTERED_KEYS`** — always applied: `:password`, `:password_confirmation`, `:token`, `:secret`, `:api_key`
 2. **Global config** — applied to every recorded operation:
    ```ruby
-   Easyop.configure { |c| c.recording_scrub_keys = [:api_token, /token/i] }
+   Easyop.configure { |c| c.recording_filter_keys = [:api_token, /token/i] }
    ```
-3. **Plugin `scrub_keys:` option** — applied to all subclasses that share the plugin install:
+3. **Plugin `filter_keys:` option** — applied to all subclasses that share the plugin install:
    ```ruby
-   plugin Easyop::Plugins::Recording, model: OperationLog, scrub_keys: [:stripe_secret]
+   plugin Easyop::Plugins::Recording, model: OperationLog, filter_keys: [:stripe_secret]
    ```
-4. **`scrub_params` DSL** — per-class, inheritable, and stackable at any level of the hierarchy:
+4. **`filter_params` DSL** — per-class, inheritable, and stackable at any level of the hierarchy:
    ```ruby
    class ApplicationOperation < ...
-     scrub_params :internal_token, /access.?key/i
+     filter_params :internal_token, /access.?key/i
    end
    class Payments::ChargeCard < ApplicationOperation
-     scrub_params :card_number   # stacks on top of parent's list
+     filter_params :card_number   # stacks on top of parent's list
    end
    ```
 
-Internal tracing keys (`__recording_*`) are always excluded. ActiveRecord objects are serialized as `{ id:, class: }` rather than their full representation.
+Internal tracing keys (`__recording_*`) are always fully removed. ActiveRecord objects are serialized as `{ id:, class: }` rather than their full representation.
+
+**`record_params` DSL — control what goes into `params_data`:**
+
+By default, `params_data` records only the keys that were **present in ctx when the operation was called** (inputs), not values computed during the call body. This means `ctx.user = User.create!(...)` set during `#call` will not appear in `params_data` — use `record_result` to capture output values. FILTERED_KEYS and INTERNAL_CTX_KEYS are always excluded.
+
+Use the `record_params` DSL to further customize or suppress params recording:
+
+```ruby
+# Disable entirely — no params_data written
+class Users::Authenticate < ApplicationOperation
+  record_params false
+end
+
+# Selective keys — only these ctx attrs are recorded
+class Tickets::GenerateTickets < ApplicationOperation
+  record_params attrs: %i[event_id seat_count]
+end
+
+# Block — full control over the extracted hash
+class Reports::GeneratePdf < ApplicationOperation
+  record_params { |ctx| { report_type: ctx.report_type, page_count: ctx.pages } }
+end
+
+# Symbol — delegates to a private method on the instance
+class Payments::ChargeCard < ApplicationOperation
+  record_params :safe_params
+
+  private
+  def safe_params
+    { user_id: ctx.user.id, amount_cents: ctx.amount_cents }
+  end
+end
+```
+
+FILTERED_KEYS are **always applied** to the extracted hash regardless of form — including custom attrs, blocks, and symbol methods. Plugin install-level `record_params:` accepts the same forms as the DSL.
+
+> **Input vs. output**: The `true` (default) form records only keys present *before* the call body runs — values computed during `#call` (like `ctx.user`) are excluded. Custom forms (attrs, block, symbol) are evaluated *after* the call, so they can access computed values. Use `record_result` to capture outputs alongside inputs.
 
 **`record_result` DSL — capture output data:**
 
@@ -728,9 +768,14 @@ Add an optional `result_data :text` column to persist selected ctx values after 
 add_column :operation_logs, :result_data, :text  # stored as JSON
 ```
 
-Then declare what to record using the `record_result` DSL (three forms):
+Then declare what to record using the `record_result` DSL (four forms):
 
 ```ruby
+# True form — full ctx snapshot (FILTERED_KEYS applied, internal keys excluded)
+class Users::Register < ApplicationOperation
+  record_result true
+end
+
 # Attrs form — one or more ctx keys
 class PlaceOrder < ApplicationOperation
   record_result attrs: :order_id
@@ -761,7 +806,8 @@ Set a plugin-level default inherited by all subclasses:
 
 ```ruby
 plugin Easyop::Plugins::Recording, model: OperationLog,
-       record_result: { attrs: :metadata }
+       record_result: true
+# or: record_result: { attrs: :metadata }
 # or: record_result: ->(ctx) { { id: ctx.record_id } }
 # or: record_result: :build_result
 ```

@@ -12,7 +12,7 @@
 <aside class="sidebar">
   <div class="sidebar-header">
     <a href="index.html" class="sidebar-logo">EasyOp</a>
-    <span class="sidebar-version">v0.1.5</span>
+    <span class="sidebar-version">v0.1.7</span>
   </div>
   <nav class="sidebar-nav">
     <div class="nav-group">
@@ -111,14 +111,24 @@ class CreateOperationLogs &lt; ActiveRecord::Migration[7.1]
       t.string   :operation_name, null: false
       t.boolean  :success,        null: false
       t.string   :error_message
-      t.text     :params_data          # JSON — sensitive keys scrubbed automatically
+      t.text     :params_data          # JSON — INPUT keys only; sensitive values replaced with [FILTERED]
       t.float    :duration_ms
       t.datetime :performed_at,   null: false
+
+      # Optional — add when using the record_result DSL to capture output data:
+      t.text     :result_data          # JSON — ctx snapshot after the call (computed values included)
     end
 
     add_index :operation_logs, :operation_name
     add_index :operation_logs, :performed_at
     add_index :operation_logs, :success
+
+    # Optional — add when using flow tracing + execution order:
+    # add_column :operation_logs, :root_reference_id,     :string
+    # add_column :operation_logs, :reference_id,          :string
+    # add_column :operation_logs, :parent_operation_name, :string
+    # add_column :operation_logs, :parent_reference_id,   :string
+    # add_column :operation_logs, :execution_index,       :integer
   end
 end</code></pre>
 
@@ -311,7 +321,7 @@ end</code></pre>
 end</code></pre>
 
       <footer>
-        EasyOp v0.1.5 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.1.7 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>
