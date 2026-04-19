@@ -31,6 +31,7 @@
       <a href="plugins.html" class="active">All Plugins</a>
       <a href="plugins.html#instrumentation" style="padding-left:1.5rem;font-size:0.8rem">Instrumentation</a>
       <a href="plugins.html#recording" style="padding-left:1.5rem;font-size:0.8rem">Recording</a>
+      <a href="plugins.html#encrypted-params" style="padding-left:2.5rem;font-size:0.75rem">Encrypted params</a>
       <a href="plugins.html#flow-tracing" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Flow Tracing</a>
       <a href="plugins.html#execution-index" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Execution Index</a>
       <a href="plugins.html#result-data" style="padding-left:2.5rem;font-size:0.75rem;color:#9ca3af">Result Data</a>
@@ -183,6 +184,7 @@ end</code></pre>
           <tr><td><code>record_params:</code></td><td><code>true</code></td><td>Control params serialization: <code>false</code> skips; <code>true</code> uses full ctx; also accepts <code>{ attrs: }</code>, Proc, or Symbol</td></tr>
           <tr><td><code>record_result:</code></td><td><code>false</code></td><td>Plugin-level default for result capture: <code>false</code> skips; <code>true</code> uses full ctx; also accepts <code>{ attrs: }</code>, Proc, or Symbol</td></tr>
           <tr><td><code>filter_keys:</code></td><td><code>[]</code></td><td>Extra keys/patterns to filter in <code>params_data</code> (Symbol, String, or Regexp) — values replaced with <code>[FILTERED]</code></td></tr>
+          <tr><td><code>encrypt_keys:</code></td><td><code>[]</code></td><td>Extra keys/patterns to encrypt-at-rest in <code>params_data</code> / <code>result_data</code> — values stored as <code>{ "$easyop_encrypted" =&gt; ciphertext }</code>. Requires <code>recording_secret</code>.</td></tr>
         </tbody>
       </table>
 
@@ -358,6 +360,60 @@ class Payments::ChargeCard &lt; ApplicationOperation
   filter_params :card_number  # stacks on top of parent's list
 end</code></pre>
       <p>Internal tracing keys (<code>__recording_*</code>) are always fully removed from <code>params_data</code>. ActiveRecord objects in ctx are serialized as <code>{ "id" =&gt; 42, "class" =&gt; "User" }</code>.</p>
+
+      <h3 id="encrypted-params">Encrypted params</h3>
+      <p>Instead of replacing a sensitive value with <code>"[FILTERED]"</code> (which destroys it), you can encrypt it at rest so the value survives in the log but is unreadable without the secret. This is useful for audit trails where you may need to replay or rollback an operation using the original inputs — for example, to refund a payment using the original card token.</p>
+
+      <pre><code class="language-ruby">require "easyop/simple_crypt"
+
+class Payments::ChargeCard &lt; ApplicationOperation
+  encrypt_params :credit_card_number, /cvv/i
+
+  def call
+    # credit_card_number is recorded as:
+    # { "$easyop_encrypted" => "&lt;ciphertext&gt;" }
+    # — the plaintext value is never written to the log column
+  end
+end</code></pre>
+
+      <p>The encrypted marker format is a JSON-safe hash: <code>{ "$easyop_encrypted" =&gt; "&lt;ciphertext&gt;" }</code>. It is stored in <code>params_data</code> / <code>result_data</code> and can be decrypted later with <code>Easyop::SimpleCrypt.decrypt_marker(value)</code>.</p>
+
+      <h4>Precedence rules</h4>
+      <p>When a key appears in multiple lists, the highest-priority rule wins:</p>
+      <ol>
+        <li><strong>Built-in <code>FILTERED_KEYS</code></strong> — always <code>"[FILTERED]"</code>. Cannot be overridden (security baseline).</li>
+        <li><strong>Encrypt list</strong> (global config + class <code>encrypt_params</code> + plugin <code>encrypt_keys:</code>) — stored as encrypted marker.</li>
+        <li><strong>User filter list</strong> (global config + class <code>filter_params</code> + plugin <code>filter_keys:</code>) — <code>"[FILTERED]"</code>.</li>
+        <li><strong>Everything else</strong> — normal serialization (AR objects → <code>{ id:, class: }</code>, primitives passthrough).</li>
+      </ol>
+
+      <h4>Layers — all additive</h4>
+      <table>
+        <thead>
+          <tr><th>Layer</th><th>How to set</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Global</td><td><code>Easyop.configure { |c| c.recording_encrypt_keys = [:ssn, /card/i] }</code></td></tr>
+          <tr><td>Plugin install</td><td><code>plugin Easyop::Plugins::Recording, model: OperationLog, encrypt_keys: [:stripe_token]</code></td></tr>
+          <tr><td>Per-class DSL</td><td><code>encrypt_params :credit_card_number, /cvv/i</code> (inheritable, stackable)</td></tr>
+        </tbody>
+      </table>
+
+      <h4>Decrypting a recorded value</h4>
+      <pre><code class="language-ruby">log = OperationLog.find(id)
+raw = JSON.parse(log.params_data)["credit_card_number"]
+# =&gt; { "$easyop_encrypted" =&gt; "..." }
+
+card = Easyop::SimpleCrypt.decrypt_marker(raw)
+# =&gt; "4111111111111111"  (original plaintext)</code></pre>
+
+      <p><code>decrypt_marker</code> is a pass-through: if the value is not an encrypted marker it is returned as-is, so it is safe to call unconditionally on any recorded value.</p>
+
+      <h4>Encryption secret</h4>
+      <p>Requires a ≥ 32-byte secret. See <a href="rails.html#encryption-secret">Supplying the Encryption Secret</a> in the Rails Integration guide for all configuration options.</p>
+
+      <h4>Encryption failure handling</h4>
+      <p>If the secret is missing or encryption raises, the value is stored as <code>"[ENCRYPTION_FAILED]"</code> and a warning is emitted via <code>Rails.logger</code> (or <code>$stderr</code> outside Rails). This follows the same fail-soft posture as the rest of the Recording plugin — a failed encrypt never crashes the operation.</p>
 
       <h3>Opting out</h3>
       <pre><code class="language-ruby"># Disable recording for this class only:

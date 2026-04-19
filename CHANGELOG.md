@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Easyop::SimpleCrypt`** — new utility module wrapping `ActiveSupport::MessageEncryptor`. Provides `encrypt`, `decrypt`, `encrypted_marker?`, and `decrypt_marker` helpers. Raises `MissingSecretError` / `EncryptionError` / `DecryptionError`.
+
+- **Five-step secret resolution chain** for `Easyop::SimpleCrypt.default_secret` (highest → lowest priority):
+  1. `Easyop.config.recording_secret` — explicit code config
+  2. `ENV["EASYOP_RECORDING_SECRET"]` — env var / Docker secret / CI
+  3. `Rails.application.credentials.easyop.recording_secret` — nested Rails credentials namespace
+  4. `Rails.application.credentials.easyop_recording_secret` — flat Rails credentials key
+  5. `Rails.application.credentials.secret_key_base` — app fallback (dev/test out-of-the-box)
+
+  The internal `_creds_dig` helper handles all common Rails credentials shapes: `ActiveSupport::EncryptedConfiguration`, `HashWithIndifferentAccess`, `OrderedOptions`, and plain `Hash` — including both symbol and string keys.
+
+- **`encrypt_params` DSL for the Recording plugin** — per-class, inheritable, and stackable (mirrors `filter_params`). Values matched by the encrypt list are stored as `{ "$easyop_encrypted" => "<ciphertext>" }` marker hashes in `params_data` and `result_data`. Recoverable via `Easyop::SimpleCrypt.decrypt_marker`. Encryption failures store `"[ENCRYPTION_FAILED]"` and emit a warning — they never raise from the operation.
+
+- **`encrypt_keys:` install option and `recording_encrypt_keys` global config** — plugin-level and application-level defaults for the encrypt list, equivalent to the class-level DSL.
+
+- **Precedence rule** (highest wins): built-in `FILTERED_KEYS` → `"[FILTERED]"`; encrypt list → encrypted marker; user filter list → `"[FILTERED]"`; otherwise normal serialization.
+
+- **Example app: `LogRollback` service** (`examples/easyop_test_app/app/services/log_rollback.rb`) — demonstrates building compensating transactions on top of Recording data. Walks a `root_reference_id` tree in reverse `execution_index` order, calling `klass.undo(log)` on each step. Supports `on_error: :raise | :collect | :halt`, `transaction:`, and `allow_partial:` options.
+
+- **Example app: `Flows::PurchaseAccess`** — new demo flow showing `encrypt_params :credit_card_number` + `record_result attrs: %i[payment]` + `def self.undo(log)` that decrypts the card and issues a refund via a stub `RefundService`.
+
+- **Example app: `Logs::UndoFromLog` operation** — thin wrapper around `LogRollback.undo!` that records the rollback itself as an `OperationLog` entry, giving admins a full audit trail of every rollback.
+
+- **Example app: admin rollback UI** — the operation log show page now displays a "Rollback this flow" button for fully-successful trees, highlights encrypted params with a lock badge, and labels undoable steps.
+
 ## [0.1.7] — 2026-04-15
 
 ### Added

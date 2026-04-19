@@ -320,10 +320,28 @@ end
 
 ### Configuration
 
+All options are set via `Easyop.configure` in an initializer:
+
 ```ruby
+# config/initializers/easyop.rb
 Easyop.configure do |c|
-  c.strict_types  = false    # true = ctx.fail! on type mismatch; false = warn (default)
-  c.type_adapter  = :native  # :none, :native (default), :literal, :dry, :active_model
+  # ── Schema validation ────────────────────────────────────────────────────────
+  c.strict_types = false    # true  → ctx.fail! on type mismatch
+                            # false → warn and continue (default)
+  c.type_adapter = :native  # :none | :native (default) | :literal | :dry | :active_model
+
+  # ── Recording plugin — global filter / encrypt lists ─────────────────────────
+  # Applied to every operation that has the Recording plugin installed.
+  c.recording_filter_keys  = [:internal_token, /secret/i]   # redact these keys
+  c.recording_encrypt_keys = [:stripe_token, /card/i]        # encrypt these keys
+
+  # ── Recording plugin — encryption secret ─────────────────────────────────────
+  # Required when using encrypt_params / recording_encrypt_keys.
+  # Must be ≥ 32 bytes. See "Supplying the encryption secret" below.
+  c.recording_secret = ENV["EASYOP_RECORDING_SECRET"]
+
+  # ── Events bus ───────────────────────────────────────────────────────────────
+  c.event_bus = :memory           # :memory (default) | :active_support | custom adapter
 end
 ```
 
@@ -331,6 +349,99 @@ Reset to defaults (useful in tests):
 
 ```ruby
 Easyop.reset_config!
+```
+
+#### Supplying the encryption secret
+
+`c.recording_secret` accepts any string ≥ 32 bytes. When it is `nil` or blank, `Easyop::SimpleCrypt` walks the following priority chain at encrypt time and uses the **first non-blank value** it finds — so you only need to configure **one** source:
+
+| Priority | Source | When to use |
+|----------|--------|-------------|
+| 1 (highest) | `c.recording_secret = "…"` | explicit code — dev overrides, tests |
+| 2 | `ENV["EASYOP_RECORDING_SECRET"]` | env var, Docker secret, CI pipeline |
+| 3 | `credentials.easyop.recording_secret` | nested Rails credentials namespace |
+| 4 | `credentials.easyop_recording_secret` | flat Rails credentials key |
+| 5 (lowest) | `credentials.secret_key_base` | automatic fallback — dev/test zero-config |
+
+**Option 1 — explicit config (highest priority)**
+
+Useful in tests and simple setups. Avoid hardcoding a real secret in source code.
+
+```ruby
+Easyop.configure do |c|
+  c.recording_secret = "a" * 32   # test stub
+end
+```
+
+**Option 2 — environment variable**
+
+Recommended for containers, Heroku, and 12-factor deployments.
+
+```sh
+# Generate a key:
+openssl rand -hex 32
+# → e.g. "a3f9c2…" (64 hex chars = 32 bytes)
+```
+
+```ruby
+Easyop.configure do |c|
+  c.recording_secret = ENV["EASYOP_RECORDING_SECRET"]
+end
+```
+
+**Option 3 — nested Rails credentials** *(recommended for Rails apps)*
+
+```sh
+rails credentials:edit
+```
+
+```yaml
+# config/credentials.yml.enc
+easyop:
+  recording_secret: "<openssl rand -hex 32>"
+```
+
+```ruby
+Easyop.configure do |c|
+  c.recording_secret = Rails.application.credentials.dig(:easyop, :recording_secret)
+end
+```
+
+**Option 4 — flat Rails credentials key**
+
+```yaml
+# config/credentials.yml.enc
+easyop_recording_secret: "<openssl rand -hex 32>"
+```
+
+```ruby
+Easyop.configure do |c|
+  c.recording_secret = Rails.application.credentials.easyop_recording_secret
+end
+```
+
+**Option 5 — auto-resolve (leave `recording_secret` unset)**
+
+When `recording_secret` is not set, `Easyop::SimpleCrypt` resolves the secret automatically each time it encrypts. In development and test Rails apps it falls back to `credentials.secret_key_base`, so encryption works with zero extra setup.
+
+```ruby
+Easyop.configure do |c|
+  # recording_secret intentionally omitted — SimpleCrypt auto-resolves
+  c.strict_types = false
+end
+```
+
+> **Production note:** never rely solely on `secret_key_base` (option 5) in production. If you ever rotate the app secret, encrypted values stored in `params_data` / `result_data` become permanently unreadable. Use option 2 or 3 with a dedicated, independently-rotatable secret.
+
+**Combining ENV with a Rails credentials fallback:**
+
+```ruby
+Easyop.configure do |c|
+  c.recording_secret =
+    ENV["EASYOP_RECORDING_SECRET"] ||
+    Rails.application.credentials.dig(:easyop, :recording_secret) ||
+    Rails.application.credentials.easyop_recording_secret
+end
 ```
 
 ---
@@ -823,6 +934,139 @@ end
 ```
 
 Recording failures are swallowed and logged as warnings — a failed log write never breaks the operation.
+
+**Encrypted recording (`encrypt_params` DSL):**
+
+Sensitive values (payment tokens, card numbers, PII) can be stored encrypted-at-rest instead of filtered. The gem ships `Easyop::SimpleCrypt`, a thin wrapper around `ActiveSupport::MessageEncryptor`, that converts the value to a `{ "$easyop_encrypted" => "<ciphertext>" }` marker hash written into `params_data` / `result_data`. The original value is recoverable by your application code (e.g. for log-based rollback) while remaining unreadable at the database row level.
+
+**Setup — configure a secret:**
+
+`Easyop::SimpleCrypt` resolves the encryption secret from the **first non-blank source** in this priority chain (you only need to configure one):
+
+| Priority | Source | Notes |
+|----------|--------|-------|
+| 1 | `Easyop.config.recording_secret` | explicit code config — always wins |
+| 2 | `ENV["EASYOP_RECORDING_SECRET"]` | env var / Docker secret / CI pipeline |
+| 3 | `credentials.easyop.recording_secret` | nested Rails credentials namespace |
+| 4 | `credentials.easyop_recording_secret` | flat Rails credentials key |
+| 5 | `credentials.secret_key_base` | app fallback — works out-of-the-box in dev/test |
+
+```ruby
+# config/initializers/easyop.rb
+
+# ── Option A: env var (12-factor / containers) ──────────────────────────────
+Easyop.configure { |c| c.recording_secret = ENV["EASYOP_RECORDING_SECRET"] }
+
+# ── Option B: nested Rails credentials (recommended for Rails apps) ─────────
+# credentials.yml.enc:
+#   easyop:
+#     recording_secret: <openssl rand -hex 32>
+Easyop.configure { |c| c.recording_secret = Rails.application.credentials.dig(:easyop, :recording_secret) }
+
+# ── Option C: flat Rails credentials key ────────────────────────────────────
+# credentials.yml.enc:
+#   easyop_recording_secret: <openssl rand -hex 32>
+Easyop.configure { |c| c.recording_secret = Rails.application.credentials.easyop_recording_secret }
+
+# ── Option D: let the gem auto-resolve at encrypt time ──────────────────────
+# Don't set recording_secret at all — SimpleCrypt walks the chain above.
+# In development/test it automatically falls back to secret_key_base (#5).
+Easyop.configure { |c| } # recording_secret left nil
+```
+
+> **Production**: use Option A (env var) or B/C (Rails encrypted credentials). Rotating `secret_key_base` (Option 5 fallback) would break decryption of already-stored values — don't rely on it in production.
+
+**`encrypt_params` DSL** — mirrors `filter_params`, inheritable and stackable:
+
+```ruby
+class Payments::ChargeCard < ApplicationOperation
+  encrypt_params :credit_card_number, :cvv
+end
+```
+
+Or set a plugin-level default:
+
+```ruby
+plugin Easyop::Plugins::Recording, model: OperationLog,
+       encrypt_keys: [:api_key]
+```
+
+Or globally:
+
+```ruby
+Easyop.configure do |c|
+  c.recording_encrypt_keys = [:stripe_token]
+end
+```
+
+**Precedence** (highest wins):
+1. Built-in `FILTERED_KEYS` (`password`, `token`, `secret`, `api_key`, `password_confirmation`) → always `"[FILTERED]"` — cannot be encrypted.
+2. `encrypt_params` / `encrypt_keys` / `recording_encrypt_keys` → encrypted marker.
+3. `filter_params` / `filter_keys` / `recording_filter_keys` → `"[FILTERED]"`.
+4. Everything else → normal serialization (AR objects → `{id:, class:}`, primitives passthrough).
+
+**Decrypting a marker in application code:**
+
+```ruby
+# Pass-through for non-encrypted values; decrypts and JSON-parses structured values.
+plain = Easyop::SimpleCrypt.decrypt_marker(params["credit_card_number"])
+```
+
+**`Easyop::SimpleCrypt` API:**
+
+```ruby
+Easyop::SimpleCrypt.encrypt(value)              # → ciphertext string
+Easyop::SimpleCrypt.decrypt(ciphertext)         # → original string (raises DecryptionError on tamper)
+Easyop::SimpleCrypt.encrypted_marker?(value)    # → true if { "$easyop_encrypted" => ... }
+Easyop::SimpleCrypt.decrypt_marker(value)       # → pass-through or decrypted value
+```
+
+Errors: `Easyop::SimpleCrypt::MissingSecretError`, `EncryptionError`, `DecryptionError`. Encryption failures store `"[ENCRYPTION_FAILED]"` and log a warning — they never raise from the operation.
+
+---
+
+**Building a log-based rollback (application recipe):**
+
+Once operations record their inputs and outputs via the Recording plugin, you can build compensating transactions that undo a completed flow purely from `OperationLog` data — no live ctx needed.
+
+This is an **application-level feature**, not a gem plugin. The gem provides the building blocks (`SimpleCrypt`, `encrypt_params`, `record_result`); your app provides the rollback service and the `def self.undo(log)` convention.
+
+A full, working implementation is in the example app:
+- `examples/easyop_test_app/app/services/log_rollback.rb` — the `LogRollback` service
+- `examples/easyop_test_app/app/operations/logs/undo_from_log.rb` — an operation that runs `LogRollback` and records the rollback itself
+- `examples/easyop_test_app/app/operations/flows/purchase_access.rb` — a flow with `encrypt_params :credit_card_number` + `def self.undo(log)` that decrypts the card to issue a refund
+
+**Convention: add `def self.undo(log)` to each reversible operation:**
+
+```ruby
+class Payments::ChargeCard < ApplicationOperation
+  encrypt_params :credit_card_number
+  record_result attrs: %i[payment]
+
+  def call
+    ctx.payment = Payment.create!(amount: ctx.amount, ...)
+  end
+
+  def self.undo(log)
+    card    = Easyop::SimpleCrypt.decrypt_marker(log.parsed_params["credit_card_number"])
+    payment = Payment.find(log.parsed_result.dig("payment", "id"))
+    RefundGateway.refund!(card_number: card, amount: payment.amount)
+    payment.update!(refunded_at: Time.current)
+  end
+end
+```
+
+**`LogRollback.undo!` walks the tree in reverse execution order:**
+
+```ruby
+# Each step that defines .undo(log) is reversed; others are skipped.
+result = LogRollback.undo!(root_log, on_error: :collect, transaction: true)
+result.undone   # => [{ log:, operation: }]
+result.skipped  # => [{ log:, reason: }]
+result.errors   # => [{ log:, error:, cause: }]
+```
+
+Options: `on_error: :raise` (default) | `:collect` | `:halt`; `transaction: false`; `allow_partial: false`.
 
 ---
 

@@ -14,7 +14,7 @@ Gem::Specification.new do |spec|
     result callbacks — all without requiring ActiveSupport.
   DESC
 
-  spec.files         = Dir["lib/**/*.rb", "README.md", "CHANGELOG.md"].reject { |f| f.start_with?("tmp/", "examples/") }
+  spec.files         = Dir["lib/**/*.rb", "lib/**/*.rake", "lib/**/*.tt", "README.md", "CHANGELOG.md"].reject { |f| f.start_with?("tmp/", "examples/") }
   spec.require_paths = ["lib"]
   spec.required_ruby_version = ">= 3.0.0"
 

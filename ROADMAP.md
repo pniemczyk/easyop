@@ -13,7 +13,7 @@ your own EasyOp plugin. The same template is used by the built-in generators so
 `easyop generate plugin` and `rake easyop:generate:plugin` scaffold from it locally:
 
 - Scaffold with `Plugins::Base` subclass, `RunWrapper`, and `ClassMethods` already wired
-- Minimal test setup with a fake `Operation` class so the plugin can be tested without Rails
+- Minimal test setup with a fake `Operation` class so the plugin can be tested without Rails (optional)
 - Gemspec, CI workflow, and changelog template included
 - README section explaining how to hook into the `_easyop_run` pipeline
 

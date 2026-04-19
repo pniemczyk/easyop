@@ -34,6 +34,8 @@
       <div class="nav-group-label">Guides</div>
       <a href="testing.html">Testing</a>
       <a href="rails.html" class="active">Rails Integration</a>
+      <a href="rails.html#configure" style="padding-left:1.5rem;font-size:0.8rem">Configuration</a>
+      <a href="rails.html#encryption-secret" style="padding-left:1.5rem;font-size:0.8rem">Encryption Secret</a>
       <a href="ai-tools.html">AI Tools</a>
     </div>
   </nav>
@@ -87,9 +89,30 @@ require "easyop/plugins/instrumentation"
 require "easyop/plugins/recording"
 require "easyop/plugins/async"
 require "easyop/plugins/transactional"
+require "easyop/simple_crypt"   # needed only when using encrypt_params DSL
 
 Easyop.configure do |c|
+  # Raise on type mismatch in development/test; warn silently in production:
   c.strict_types = Rails.env.development? || Rails.env.test?
+
+  # Global filter — replace these keys with "[FILTERED]" across every recorded op:
+  c.recording_filter_keys = [:api_token, /internal_key/i]
+
+  # Global encrypt — store these keys as encrypted markers instead of plaintext:
+  c.recording_encrypt_keys = [:ssn, /card/i]
+
+  # Encryption secret for encrypt_params / recording_encrypt_keys.
+  # Resolution order (first non-blank value wins):
+  #   1. This attr  — highest priority (explicit code config)
+  #   2. ENV["EASYOP_RECORDING_SECRET"]
+  #   3. credentials.easyop.recording_secret  (nested namespace)
+  #   4. credentials.easyop_recording_secret  (flat key)
+  #   5. credentials.secret_key_base          (Rails app fallback — dev/test only)
+  c.recording_secret = ENV.fetch("EASYOP_RECORDING_SECRET") {
+    Rails.application.credentials.dig(:easyop, :recording_secret) ||
+      Rails.application.credentials.easyop_recording_secret       ||
+      Rails.application.credentials.secret_key_base
+  }
 end
 
 class ApplicationOperation
@@ -101,6 +124,65 @@ end
 
 # Attach the built-in log subscriber:
 Easyop::Plugins::Instrumentation.attach_log_subscriber</code></pre>
+
+      <h2 id="configure">Configuration Reference (<code>Easyop.configure</code>)</h2>
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>strict_types</code></td><td><code>false</code></td><td>Raise <code>Ctx::Failure</code> on schema type mismatch. <code>false</code> emits a warning instead.</td></tr>
+          <tr><td><code>type_adapter</code></td><td><code>:native</code></td><td>Schema type adapter: <code>:none</code>, <code>:native</code>, <code>:literal</code>, <code>:dry</code>, <code>:active_model</code>.</td></tr>
+          <tr><td><code>event_bus</code></td><td><code>nil</code> (memory)</td><td>Bus adapter for domain events: <code>:memory</code>, <code>:active_support</code>, or a custom bus instance.</td></tr>
+          <tr><td><code>recording_filter_keys</code></td><td><code>[]</code></td><td>Extra keys to replace with <code>"[FILTERED]"</code> in every recorded operation. Appended to the built-in list.</td></tr>
+          <tr><td><code>recording_encrypt_keys</code></td><td><code>[]</code></td><td>Extra keys to encrypt-at-rest across all recorded operations. Merged with per-class <code>encrypt_params</code>.</td></tr>
+          <tr><td><code>recording_secret</code></td><td><code>nil</code></td><td>32+ byte secret for <code>encrypt_params</code>. When <code>nil</code>, auto-resolved via ENV → credentials chain.</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="encryption-secret">Supplying the Encryption Secret</h2>
+      <p>The secret is resolved automatically in this priority order — you only need to configure one source:</p>
+      <table>
+        <thead>
+          <tr><th>Priority</th><th>Source</th><th>When to use</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td><code>Easyop.configure { |c| c.recording_secret = "..." }</code></td><td>Explicit code config (e.g. pass a secret loaded from your own vault)</td></tr>
+          <tr><td>2</td><td><code>ENV["EASYOP_RECORDING_SECRET"]</code></td><td>Recommended for production — set via your deploy tooling or Docker secrets</td></tr>
+          <tr><td>3</td><td><code>credentials.easyop.recording_secret</code></td><td>Rails encrypted credentials, nested namespace</td></tr>
+          <tr><td>4</td><td><code>credentials.easyop_recording_secret</code></td><td>Rails encrypted credentials, flat key</td></tr>
+          <tr><td>5</td><td><code>credentials.secret_key_base</code></td><td>Dev/test fallback — <strong>do not rely on this in production</strong></td></tr>
+        </tbody>
+      </table>
+
+      <h3>Option 2 — environment variable (recommended for production)</h3>
+      <pre><code class="language-bash"># Generate a 32-byte secret:
+openssl rand -hex 32
+
+# Set it in your environment or Docker secrets file:
+EASYOP_RECORDING_SECRET=abc123...
+
+# No code change needed — EasyOp reads it automatically.</code></pre>
+
+      <h3>Option 3 — Rails encrypted credentials (nested namespace)</h3>
+      <pre><code class="language-bash">rails credentials:edit</code></pre>
+      <pre><code class="language-yaml">easyop:
+  recording_secret: "your-32-plus-byte-secret-here"</code></pre>
+      <p>EasyOp resolves it as <code>Rails.application.credentials.dig(:easyop, :recording_secret)</code>. No initializer change needed when using the auto-resolve chain.</p>
+
+      <h3>Option 4 — Rails encrypted credentials (flat key)</h3>
+      <pre><code class="language-yaml"># credentials.yml.enc
+easyop_recording_secret: "your-32-plus-byte-secret-here"</code></pre>
+
+      <h3>Combined pattern (ENV with credentials fallback)</h3>
+      <pre><code class="language-ruby">Easyop.configure do |c|
+  c.recording_secret = ENV.fetch("EASYOP_RECORDING_SECRET") {
+    Rails.application.credentials.dig(:easyop, :recording_secret) ||
+      Rails.application.credentials.easyop_recording_secret       ||
+      Rails.application.credentials.secret_key_base
+  }
+end</code></pre>
+      <div class="callout callout-warning"><strong>Production warning:</strong> The <code>secret_key_base</code> fallback (option 5) is intentionally last. It means encrypted recordings use the same key as session cookies — acceptable for development but a security risk in production. Always configure a dedicated secret before deploying.</div>
 
       <h2 id="operation-log-migration">OperationLog Migration</h2>
 

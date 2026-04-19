@@ -47,6 +47,20 @@ module Easyop
     #                             (Symbol, String, or Regexp — additive with FILTERED_KEYS)
     #                             Filtered keys are kept in params_data but their value
     #                             is replaced with "[FILTERED]".
+    #   encrypt_keys:  []         keys/patterns whose values are encrypted rather than
+    #                             filtered. Requires Easyop.config.recording_secret (≥32 bytes).
+    #                             Stored as { "$easyop_encrypted" => "<ciphertext>" } markers.
+    #                             Decryptable via Easyop::SimpleCrypt.decrypt_marker(value).
+    #                             (Symbol, String, or Regexp — additive with class-level DSL)
+    #
+    # Class-level DSL for encryption:
+    #   encrypt_params :credit_card_number, /^card_/
+    #
+    # Precedence (highest wins):
+    #   1. Built-in FILTERED_KEYS (password, token, etc.) → always "[FILTERED]"
+    #   2. encrypt_keys / encrypt_params list → encrypted marker hash
+    #   3. filter_keys / filter_params list  → "[FILTERED]"
+    #   4. Otherwise → normal serialization (AR objects → {id:, class:})
     module Recording
       # Sensitive keys always filtered in params_data before persisting.
       # Their values are replaced with "[FILTERED]" rather than removed.
@@ -60,13 +74,14 @@ module Easyop
         __recording_child_counts
       ].freeze
 
-      def self.install(base, model:, record_params: true, record_result: false, filter_keys: [], **_options)
+      def self.install(base, model:, record_params: true, record_result: false, filter_keys: [], encrypt_keys: [], **_options)
         base.extend(ClassMethods)
         base.prepend(RunWrapper)
         base.instance_variable_set(:@_recording_model,          model)
         base.instance_variable_set(:@_recording_record_params,  record_params)
         base.instance_variable_set(:@_recording_record_result,  record_result)
         base.instance_variable_set(:@_recording_filter_keys,    Array(filter_keys))
+        base.instance_variable_set(:@_recording_encrypt_keys,   Array(encrypt_keys))
       end
 
       module ClassMethods
@@ -161,10 +176,35 @@ module Easyop
           parent + _own_recording_filter_keys
         end
 
+        # DSL to declare keys whose values should be encrypted rather than redacted.
+        # Accepts Symbol, String, or Regexp. Additive with any encrypt_keys declared
+        # on parent classes or at the plugin install level.
+        # Encrypted values are stored as { "$easyop_encrypted" => "<ciphertext>" }.
+        # Requires Easyop.config.recording_secret to be set (≥32 bytes).
+        # Decrypt with: Easyop::SimpleCrypt.decrypt_marker(value)
+        #
+        # @example
+        #   class ChargePayment < ApplicationOperation
+        #     encrypt_params :credit_card_number, /^card_/
+        #   end
+        def encrypt_params(*keys)
+          @_recording_encrypt_keys = _own_recording_encrypt_keys + keys
+        end
+
+        # Returns the merged encrypt list: parent class keys + this class's own keys.
+        def _recording_encrypt_keys
+          parent = superclass.respond_to?(:_recording_encrypt_keys) ? superclass._recording_encrypt_keys : []
+          parent + _own_recording_encrypt_keys
+        end
+
         private
 
         def _own_recording_filter_keys
           instance_variable_defined?(:@_recording_filter_keys) ? @_recording_filter_keys : []
+        end
+
+        def _own_recording_encrypt_keys
+          instance_variable_defined?(:@_recording_encrypt_keys) ? @_recording_encrypt_keys : []
         end
       end
 
@@ -289,19 +329,10 @@ module Easyop
           nil
         end
 
-        # Returns true when +key+ matches any entry in +filter_list+.
-        # Regexp entries match against the stringified key name (case-sensitive
-        # unless the Regexp itself uses /i). Symbol/String entries match by value.
+        # Returns true when +key+ is in the extra filter list.
+        # (Built-in FILTERED_KEYS check is handled by _recording_apply_and_serialize directly.)
         def _recording_filter_key?(key, extra_list)
-          return true if FILTERED_KEYS.include?(key.to_sym)
-
-          extra_list.any? do |pattern|
-            case pattern
-            when Regexp then pattern.match?(key.to_s)
-            when Symbol then pattern == key.to_sym
-            else             pattern.to_s == key.to_s
-            end
-          end
+          _recording_match_key?(key, extra_list)
         end
 
         def _recording_safe_result(ctx)
@@ -330,12 +361,50 @@ module Easyop
           nil
         end
 
-        # Applies FILTERED_KEYS + class/global filter lists to +hash+, replacing
-        # matched values with "[FILTERED]" and serializing ActiveRecord objects.
+        # Applies filter and encrypt lists to +hash+, then serializes values.
+        #
+        # Precedence:
+        #   1. Built-in FILTERED_KEYS            → "[FILTERED]"   (always, cannot be overridden)
+        #   2. encrypt_keys / encrypt_params list → encrypted marker hash
+        #   3. filter_keys / filter_params list   → "[FILTERED]"
+        #   4. Otherwise                          → normal serialization
         def _recording_apply_and_serialize(hash)
-          extra = Easyop.config.recording_filter_keys.to_a + self.class._recording_filter_keys
+          filter_extra  = Easyop.config.recording_filter_keys.to_a + self.class._recording_filter_keys
+          encrypt_extra = Easyop.config.recording_encrypt_keys.to_a + self.class._recording_encrypt_keys
+
           hash.each_with_object({}) do |(k, v), h|
-            h[k] = _recording_filter_key?(k, extra) ? '[FILTERED]' : _recording_serialize_value(v)
+            h[k] = if FILTERED_KEYS.include?(k.to_sym)
+                     '[FILTERED]'
+                   elsif _recording_match_key?(k, encrypt_extra)
+                     _recording_encrypt_value(v)
+                   elsif _recording_filter_key?(k, filter_extra)
+                     '[FILTERED]'
+                   else
+                     _recording_serialize_value(v)
+                   end
+          end
+        end
+
+        # Encrypt a single value for storage. Serializes non-string values to JSON
+        # first so structured data (hashes, AR stubs) can be recovered on decrypt.
+        def _recording_encrypt_value(value)
+          require 'easyop/simple_crypt'
+          serialized = _recording_serialize_value(value)
+          payload    = serialized.is_a?(String) ? serialized : serialized.to_json
+          { Easyop::SimpleCrypt::MARKER_KEY => Easyop::SimpleCrypt.encrypt(payload) }
+        rescue Easyop::SimpleCrypt::MissingSecretError, Easyop::SimpleCrypt::EncryptionError => e
+          _recording_warn(e)
+          '[ENCRYPTION_FAILED]'
+        end
+
+        # Returns true when +key+ matches any entry in +match_list+.
+        def _recording_match_key?(key, match_list)
+          match_list.any? do |pattern|
+            case pattern
+            when Regexp then pattern.match?(key.to_s)
+            when Symbol then pattern == key.to_sym
+            else             pattern.to_s == key.to_s
+            end
           end
         end
 

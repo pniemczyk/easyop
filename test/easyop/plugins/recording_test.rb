@@ -1443,4 +1443,162 @@ class PluginsRecordingTest < Minitest::Test
       end
     end
   end
+
+  # ── encrypt_params DSL ────────────────────────────────────────────────────────
+
+  ENCRYPT_SECRET = "encryptsecret_padded_to_32bytes!".freeze
+
+  # FakeModel variant that holds params_data only (same as base FakeModel).
+  def encrypt_model
+    @encrypt_model ||= FakeModel.new
+  end
+
+  def named_encrypt_op(const_name, encrypt_keys: [], install_encrypt_keys: [], &call_block)
+    m = encrypt_model
+    ek = encrypt_keys
+    iek = install_encrypt_keys
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, encrypt_keys: iek
+      encrypt_params(*ek) unless ek.empty?
+      define_method(:call, &call_block) if call_block
+    end
+    set_const(const_name, klass)
+    klass
+  end
+
+  def decrypt_params(record)
+    data = JSON.parse(record[:params_data])
+    data.transform_values { |v| Easyop::SimpleCrypt.decrypt_marker(v) }
+  end
+
+  def with_encrypt_secret(&block)
+    Easyop.configure { |c| c.recording_secret = ENCRYPT_SECRET }
+    block.call
+  ensure
+    Easyop.configure { |c| c.recording_secret = nil }
+  end
+
+  def test_encrypt_params_stores_marker_hash
+    named_encrypt_op('EncBasicOp', encrypt_keys: [:card]) { }
+    with_encrypt_secret do
+      encrypt_model.records.clear
+      Object.const_get('EncBasicOp').call(card: "4242")
+      data = JSON.parse(encrypt_model.records.first[:params_data])
+      assert data["card"].is_a?(Hash), "expected marker hash, got: #{data['card'].inspect}"
+      assert data["card"].key?("$easyop_encrypted"), "expected $easyop_encrypted key"
+    end
+  end
+
+  def test_encrypt_params_value_is_decryptable
+    named_encrypt_op('EncDecOp', encrypt_keys: [:card]) { }
+    with_encrypt_secret do
+      encrypt_model.records.clear
+      Object.const_get('EncDecOp').call(card: "4242-secret")
+      data    = JSON.parse(encrypt_model.records.first[:params_data])
+      marker  = data["card"]
+      decrypted = Easyop::SimpleCrypt.decrypt_marker(marker)
+      assert_equal "4242-secret", decrypted
+    end
+  end
+
+  def test_encrypt_params_via_dsl_on_class
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: FakeModel.new
+      encrypt_params :card_number
+    end
+    set_const('EncDslOp', klass)
+    assert_includes Object.const_get('EncDslOp')._recording_encrypt_keys, :card_number
+  end
+
+  def test_encrypt_params_inherits_from_parent
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: FakeModel.new
+      encrypt_params :parent_key
+    end
+    set_const('EncInhParent', parent)
+
+    child = Class.new(parent) do
+      encrypt_params :child_key
+    end
+    set_const('EncInhChild', child)
+
+    keys = Object.const_get('EncInhChild')._recording_encrypt_keys
+    assert_includes keys, :parent_key
+    assert_includes keys, :child_key
+  end
+
+  def test_encrypt_params_via_install_option
+    m = FakeModel.new
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, encrypt_keys: [:card_number]
+    end
+    set_const('EncInstallOp', klass)
+    with_encrypt_secret do
+      m.records.clear
+      Object.const_get('EncInstallOp').call(card_number: "4242-via-install")
+      data = JSON.parse(m.records.first[:params_data])
+      assert data["card_number"].is_a?(Hash)
+    end
+  end
+
+  def test_builtin_filtered_keys_win_over_encrypt_params
+    # :password is in FILTERED_KEYS — cannot be promoted to encrypted
+    named_encrypt_op('EncBuiltinWinsOp', encrypt_keys: [:password]) { }
+    with_encrypt_secret do
+      encrypt_model.records.clear
+      Object.const_get('EncBuiltinWinsOp').call(password: "supersecret")
+      data = JSON.parse(encrypt_model.records.first[:params_data])
+      assert_equal "[FILTERED]", data["password"], "built-in FILTERED_KEYS must always win over encrypt list"
+    end
+  end
+
+  def test_encrypt_wins_over_user_filter_for_non_builtin_keys
+    m = FakeModel.new
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, filter_keys: [:card], encrypt_keys: [:card]
+    end
+    set_const('EncVsFilterOp', klass)
+    with_encrypt_secret do
+      m.records.clear
+      Object.const_get('EncVsFilterOp').call(card: "1234")
+      data = JSON.parse(m.records.first[:params_data])
+      # encrypt should win over filter for non-builtin keys
+      assert data["card"].is_a?(Hash), "encrypt should win over filter, got: #{data['card'].inspect}"
+    end
+  end
+
+  def test_encrypt_params_stores_encryption_failed_when_no_secret
+    named_encrypt_op('EncNoSecretOp', encrypt_keys: [:card]) { }
+    # no secret configured — default from test helper teardown ensures it's reset
+    Easyop.configure { |c| c.recording_secret = nil }
+    begin
+      encrypt_model.records.clear
+      Object.const_get('EncNoSecretOp').call(card: "4242")
+      data = JSON.parse(encrypt_model.records.first[:params_data])
+      assert_equal "[ENCRYPTION_FAILED]", data["card"]
+    ensure
+      Easyop.configure { |c| c.recording_secret = nil }
+    end
+  end
+
+  def test_encrypt_params_regexp_pattern
+    m = FakeModel.new
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m, encrypt_keys: [/^card/]
+    end
+    set_const('EncRegexpOp', klass)
+    with_encrypt_secret do
+      m.records.clear
+      Object.const_get('EncRegexpOp').call(card_number: "9999", other: "ok")
+      data = JSON.parse(m.records.first[:params_data])
+      assert data["card_number"].is_a?(Hash), "card_number should be encrypted"
+      assert_equal "ok", data["other"], "other should be plain"
+    end
+  end
 end
