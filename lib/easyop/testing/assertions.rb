@@ -62,7 +62,8 @@ module Easyop
       # ── Operation stubbing ────────────────────────────────────────────────
 
       # Stub an operation to return a preset ctx without executing it.
-      # Requires Minitest::Mock or a compatible stub mechanism.
+      # Works with both Minitest (uses Object#stub from minitest/mock) and
+      # RSpec (uses allow().to receive()).
       #
       #   stub_op(Users::Register, success: false, error: "Already exists") do
       #     # code under test that calls Users::Register.call(...)
@@ -78,16 +79,44 @@ module Easyop
           end
         end
 
-        raise_failure = ->(*_) { raise Easyop::Ctx::Failure, stubbed }
+        if _easyop_rspec_context?
+          _easyop_stub_via_rspec(klass, stubbed, success, &block)
+        else
+          _easyop_stub_via_minitest(klass, stubbed, success, &block)
+        end
+      end
 
-        klass.stub(:call,  stubbed) do
+      private
+
+      def _easyop_rspec_context?
+        defined?(RSpec::Mocks) && respond_to?(:allow, true)
+      end
+
+      def _easyop_stub_via_rspec(klass, stubbed, success, &block)
+        allow(klass).to receive(:call).and_return(stubbed)
+        if success
+          allow(klass).to receive(:call!).and_return(stubbed)
+        else
+          failure = Easyop::Ctx::Failure.new(stubbed)
+          allow(klass).to receive(:call!).and_raise(failure)
+        end
+        block.call if block
+      ensure
+        # Restore original behaviour after the block so subsequent calls in the
+        # same example are not affected (mirrors Minitest Object#stub scoping).
+        allow(klass).to receive(:call).and_call_original
+        allow(klass).to receive(:call!).and_call_original
+      end
+
+      def _easyop_stub_via_minitest(klass, stubbed, success, &block)
+        require "minitest/mock"
+        raise_failure = ->(*_) { raise Easyop::Ctx::Failure.new(stubbed) }
+        klass.stub(:call, stubbed) do
           klass.stub(:call!, success ? stubbed : raise_failure) do
             block.call if block
           end
         end
       end
-
-      private
 
       def _easyop_assert(condition, message)
         if respond_to?(:assert, true)
@@ -101,7 +130,9 @@ module Easyop
         if respond_to?(:assert_equal, true)
           assert_equal expected, actual, message
         else
-          raise message unless expected == actual
+          unless expected == actual
+            raise "#{message}\n  expected: #{expected.inspect}\n       got: #{actual.inspect}"
+          end
         end
       end
     end
