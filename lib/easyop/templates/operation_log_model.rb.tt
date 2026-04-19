@@ -1,0 +1,30 @@
+# frozen_string_literal: true
+
+# app/models/operation_log.rb
+class OperationLog < ApplicationRecord
+  scope :for_tree,    ->(root_id) { where(root_reference_id: root_id).order(:performed_at) }
+  scope :children_of, ->(ref_id)  { where(parent_reference_id: ref_id).order(:execution_index) }
+  scope :roots,       ->           { where(parent_reference_id: nil) }
+  scope :successful,  ->           { where(success: true) }
+
+  def root?
+    parent_reference_id.nil?
+  end
+
+  def parsed_params
+    @parsed_params ||= params_data.present? ? JSON.parse(params_data) : nil
+  rescue JSON::ParserError
+    nil
+  end
+
+  def parsed_result
+    @parsed_result ||= result_data.present? ? JSON.parse(result_data) : nil
+  rescue JSON::ParserError
+    nil
+  end
+
+  def fully_successful_tree?
+    tree_id = root_reference_id.presence || reference_id
+    !OperationLog.where(root_reference_id: tree_id).where(success: false).exists?
+  end
+end

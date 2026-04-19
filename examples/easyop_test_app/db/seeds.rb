@@ -166,6 +166,37 @@ if OperationLog.count < 5
   puts "  OperationLogs: #{OperationLog.count} sample entries"
 end
 
+# ── Sample Purchases (demonstrate encrypt_params) ────────────────────────────
+
+if Payment.count < 2
+  # Run real operations so OperationLog gets populated with encrypted params_data
+  alice_purchase = Flows::PurchaseAccess.call(
+    user:               alice,
+    amount_cents:       999,
+    credit_card_number: "4242424242424242",
+    cvv:                "123",
+    billing_zip:        "10001",
+    tier:               "standard"
+  )
+  if alice_purchase.success?
+    puts "  Purchase: alice bought standard access (payment ##{alice_purchase.payment.transaction_id})"
+  end
+
+  bob_purchase = Flows::PurchaseAccess.call(
+    user:               bob,
+    amount_cents:       2999,
+    credit_card_number: "5555555555554444",
+    cvv:                "456",
+    billing_zip:        "90210",
+    tier:               "premium"
+  )
+  if bob_purchase.success?
+    puts "  Purchase: bob bought premium access (payment ##{bob_purchase.payment.transaction_id})"
+  end
+
+  puts "  Payments: #{Payment.count} total. Check Op Logs to see encrypted params."
+end
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 puts ""

@@ -2,24 +2,33 @@
 
 <p><a href="<%= operation_logs_path %>" style="color: #555; font-size: 0.9rem;">← All logs</a></p>
 
-<h1>Execution Tree</h1>
-<p style="font-size: 0.9rem; color: #555;">
-  Root operation: <strong style="font-family: monospace;"><%= @root_log.operation_name %></strong>
-  &nbsp;·&nbsp;
-  Tree ID: <span style="font-family: monospace; font-size: 0.8rem; color: #999;"><%= @tree_id %></span>
-</p>
+<div style="display: flex; align-items: baseline; gap: 1rem; margin-bottom: 0.5rem;">
+  <h1 style="margin: 0;">Execution Tree</h1>
+  <% if @root_log.fully_successful_tree? %>
+    <span style="background: #6c6; color: white; font-size: 0.75rem; padding: 2px 8px; border-radius: 3px;">all steps ok</span>
+  <% else %>
+    <span style="background: #c44; color: white; font-size: 0.75rem; padding: 2px 8px; border-radius: 3px;">has failures</span>
+  <% end %>
+</div>
 
-<p style="background: #f0f4ff; border: 1px solid #c8d4f0; padding: 0.75rem 1rem; border-radius: 4px; font-size: 0.85rem; color: #334;">
-  All operations below share the same <code>root_reference_id</code>.
-  Each row's <code>parent_reference_id</code> points to its direct caller's <code>reference_id</code>,
-  letting you reconstruct the full call tree. Click an entry's Tree ID in the
-  <a href="<%= operation_logs_path %>">logs list</a> to reach this view.
+<div style="display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.85rem; color: #555; margin-bottom: 1.25rem;">
+  <span>Root: <strong style="font-family: monospace; color: #333;"><%= @root_log.operation_name %></strong></span>
+  <span>Steps: <strong><%= @tree_logs.count %></strong></span>
+  <span>Total time: <strong><%= @tree_logs.sum { |l| l.duration_ms || 0 }.round(1) %>ms</strong></span>
+  <span style="font-family: monospace; font-size: 0.78rem; color: #aaa;">Tree ID: <%= @tree_id %></span>
+</div>
+
+<p style="background: #f0f4ff; border: 1px solid #c8d4f0; padding: 0.75rem 1rem; border-radius: 4px; font-size: 0.82rem; color: #334; margin-bottom: 1.25rem;">
+  Each row below is one <code>OperationLog</code> record. Indentation reflects the
+  <code>parent_reference_id</code> chain. <code>params_data</code> shows input keys as the
+  operation received them; <code>result_data</code> shows output keys set by <code>record_result</code>.
+  Encrypted values (<span style="background:#5a5aaa;color:white;font-size:0.65rem;padding:1px 5px;border-radius:3px;">🔒 encrypted</span>)
+  were stored via <code>encrypt_params</code> — plaintext is never in the DB.
 </p>
 
 <%
-  # Build depth map by walking parent_reference_id links.
-  depth_map   = {}
-  ref_to_log  = @tree_logs.index_by(&:reference_id)
+  depth_map  = {}
+  ref_to_log = @tree_logs.index_by(&:reference_id)
 
   @tree_logs.each do |log|
     depth   = 0
@@ -35,82 +44,118 @@
 %>
 
 <% if @tree_logs.empty? %>
-  <p style="color: #888;">No logs found for this tree ID.</p>
+  <p style="color: #888;">No logs found for this tree.</p>
 <% else %>
-  <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 1rem;">
-    <thead>
-      <tr style="background: #f5f5f5; text-align: left;">
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Operation</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Status</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Duration</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Result Data</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Reference ID</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Parent Ref</th>
-        <th style="padding: 0.5rem; border-bottom: 2px solid #ddd;">Error</th>
-      </tr>
-    </thead>
-    <tbody>
-      <% @tree_logs.each do |log| %>
-        <% depth = depth_map[log.id] || 0 %>
-        <tr style="border-bottom: 1px solid #eee;">
-          <td style="padding: 0.5rem; font-family: monospace; padding-left: <%= 0.5 + depth * 1.25 %>rem;">
-            <% if depth > 0 %>
-              <span style="color: #bbb; margin-right: 0.25rem;">↳</span>
-            <% end %>
-            <%= log.operation_name %>
-            <% if log.parent_operation_name.present? && depth > 0 %>
-              <br><small style="color: #aaa; font-size: 0.75rem;">called by <%= log.parent_operation_name.split("::").last %></small>
-            <% end %>
-          </td>
-          <td style="padding: 0.5rem;">
-            <% if log.success? %>
-              <span class="badge badge-published">ok</span>
-            <% else %>
-              <span class="badge badge-draft">FAILED</span>
-            <% end %>
-          </td>
-          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.8rem; color: #666;">
-            <%= log.duration_ms ? "#{log.duration_ms.round(2)}ms" : "—" %>
-          </td>
-          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.75rem; color: #444; max-width: 180px;">
-            <% if log.respond_to?(:result_data) && log.result_data.present? %>
-              <% parsed = JSON.parse(log.result_data) rescue nil %>
-              <% if parsed %>
-                <% parsed.each do |k, v| %>
-                  <div><span style="color: #888;"><%= k %>:</span>
-                  <span style="color: #336;"><%= v.is_a?(Hash) ? "#{v['class']}##{v['id']}" : v.to_s.truncate(25) %></span></div>
-                <% end %>
-              <% else %>
-                <%= log.result_data.truncate(40) %>
-              <% end %>
-            <% else %>
-              <span style="color: #ccc;">—</span>
-            <% end %>
-          </td>
-          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.75rem; color: #999;">
-            <span title="<%= log.reference_id %>"><%= log.reference_id&.split('-')&.first %>…</span>
-          </td>
-          <td style="padding: 0.5rem; font-family: monospace; font-size: 0.75rem; color: #999;">
-            <% if log.parent_reference_id.present? %>
-              <span title="<%= log.parent_reference_id %>"><%= log.parent_reference_id.split('-').first %>…</span>
-            <% else %>
-              <span style="color: #ccc;">— root</span>
-            <% end %>
-          </td>
-          <td style="padding: 0.5rem; color: #c00; font-size: 0.8rem; max-width: 160px;">
-            <%= log.error_message.presence || "—" %>
-          </td>
-        </tr>
-      <% end %>
-    </tbody>
-  </table>
+  <% @tree_logs.each do |log| %>
+    <% depth    = depth_map[log.id] || 0 %>
+    <% p_parsed = log.parsed_params %>
+    <% r_parsed = log.parsed_result %>
+    <% has_enc  = log.has_encrypted_params? %>
+    <% row_bg   = log.success? ? "white" : "#fff5f5" %>
 
+    <div style="margin-left: <%= depth * 1.5 %>rem; margin-bottom: 0.5rem; border: 1px solid <%= log.success? ? '#ddd' : '#f9b' %>; border-radius: 6px; background: <%= row_bg %>; overflow: hidden;">
+      <%# Row header %>
+      <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0.75rem; border-bottom: 1px solid #eee; flex-wrap: wrap;">
+        <% if depth > 0 %>
+          <span style="color: #bbb; font-size: 0.8rem;">↳</span>
+        <% end %>
+        <span style="font-family: monospace; font-weight: bold; color: #333;"><%= log.operation_name.split("::").last %></span>
+        <span style="font-family: monospace; font-size: 0.72rem; color: #aaa;"><%= log.operation_name %></span>
+
+        <% if log.success? %>
+          <span style="background: #6c6; color: white; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px;">ok</span>
+        <% else %>
+          <span style="background: #c44; color: white; font-size: 0.7rem; padding: 1px 6px; border-radius: 3px;">FAILED</span>
+        <% end %>
+
+        <% if has_enc %>
+          <span style="background: #5a5aaa; color: white; font-size: 0.65rem; padding: 1px 6px; border-radius: 3px;"
+                title="This operation recorded encrypted params via encrypt_params DSL">
+            🔒 encrypted params
+          </span>
+        <% end %>
+
+        <span style="font-family: monospace; font-size: 0.75rem; color: #888; margin-left: auto;">
+          <%= log.duration_ms ? "#{log.duration_ms.round(2)}ms" : "—" %>
+        </span>
+      </div>
+
+      <%# Params + Result data row %>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0; font-size: 0.78rem;">
+        <%# params_data %>
+        <div style="padding: 0.6rem 0.75rem; border-right: 1px solid #eee;">
+          <div style="font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: #aaa; margin-bottom: 0.3rem;">params_data</div>
+          <% if p_parsed.any? %>
+            <% p_parsed.each do |k, v| %>
+              <div style="display: flex; gap: 0.3rem; align-items: baseline; margin-bottom: 2px; flex-wrap: wrap;">
+                <span style="color: #888; font-family: monospace; font-size: 0.75rem;"><%= k %>:</span>
+                <% if v.is_a?(Hash) && v.key?("$easyop_encrypted") %>
+                  <span style="background: #5a5aaa; color: white; font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;"
+                        title="Encrypted via encrypt_params. Stored ciphertext: <%= v['$easyop_encrypted']&.truncate(40) %>. Decrypt: Easyop::SimpleCrypt.decrypt_marker(value)">
+                    🔒 encrypted
+                  </span>
+                <% elsif v == "[FILTERED]" %>
+                  <span style="background: #f0a020; color: white; font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;"
+                        title="Value filtered via filter_params DSL or built-in FILTERED_KEYS">
+                    [FILTERED]
+                  </span>
+                <% elsif v == "[ENCRYPTION_FAILED]" %>
+                  <span style="background: #c44; color: white; font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;">
+                    [ENCRYPTION_FAILED]
+                  </span>
+                <% elsif v.is_a?(Hash) && v["class"] %>
+                  <span style="color: #336; font-family: monospace; font-size: 0.75rem;"><%= v["class"] %>#<%= v["id"] %></span>
+                <% else %>
+                  <span style="color: #444; font-family: monospace; font-size: 0.75rem;"><%= v.to_s.truncate(40) %></span>
+                <% end %>
+              </div>
+            <% end %>
+          <% else %>
+            <span style="color: #ccc; font-size: 0.75rem;">— not recorded</span>
+          <% end %>
+        </div>
+
+        <%# result_data %>
+        <div style="padding: 0.6rem 0.75rem;">
+          <div style="font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: #aaa; margin-bottom: 0.3rem;">result_data</div>
+          <% if r_parsed.any? %>
+            <% r_parsed.each do |k, v| %>
+              <div style="display: flex; gap: 0.3rem; align-items: baseline; margin-bottom: 2px; flex-wrap: wrap;">
+                <span style="color: #888; font-family: monospace; font-size: 0.75rem;"><%= k %>:</span>
+                <% if v.is_a?(Hash) && v["class"] %>
+                  <span style="color: #2a5a2a; font-family: monospace; font-size: 0.75rem;"><%= v["class"] %>#<%= v["id"] %></span>
+                <% elsif v == "[FILTERED]" %>
+                  <span style="background: #f0a020; color: white; font-size: 0.65rem; padding: 1px 5px; border-radius: 3px;">[FILTERED]</span>
+                <% else %>
+                  <span style="color: #444; font-family: monospace; font-size: 0.75rem;"><%= v.to_s.truncate(40) %></span>
+                <% end %>
+              </div>
+            <% end %>
+          <% else %>
+            <span style="color: #ccc; font-size: 0.75rem;">— not recorded (add record_result)</span>
+          <% end %>
+        </div>
+      </div>
+
+      <%# Error message %>
+      <% if log.error_message.present? %>
+        <div style="padding: 0.4rem 0.75rem; background: #fff0f0; border-top: 1px solid #fcc; font-size: 0.78rem; color: #c00;">
+          <strong>Error:</strong> <%= log.error_message %>
+        </div>
+      <% end %>
+    </div>
+  <% end %>
+
+  <%# Raw tracing section %>
   <details style="margin-top: 1.5rem;">
-    <summary style="cursor: pointer; font-size: 0.85rem; color: #666;">Raw tracing references</summary>
-    <table style="width: 100%; border-collapse: collapse; font-size: 0.75rem; font-family: monospace; margin-top: 0.5rem; background: #fafafa; border: 1px solid #eee;">
+    <summary style="cursor: pointer; font-size: 0.82rem; color: #666; padding: 0.4rem 0;">
+      Raw tracing references (reference_id / parent_reference_id / execution_index)
+    </summary>
+    <table style="width: 100%; border-collapse: collapse; font-size: 0.72rem; font-family: monospace; margin-top: 0.5rem; background: #fafafa; border: 1px solid #eee; border-radius: 4px; overflow: hidden;">
       <thead>
-        <tr style="text-align: left; color: #888; border-bottom: 1px solid #ddd;">
+        <tr style="text-align: left; color: #888; border-bottom: 1px solid #ddd; background: #f5f5f5;">
           <th style="padding: 0.4rem;">Operation</th>
+          <th style="padding: 0.4rem;">execution_index</th>
           <th style="padding: 0.4rem;">reference_id</th>
           <th style="padding: 0.4rem;">parent_reference_id</th>
           <th style="padding: 0.4rem;">root_reference_id</th>
@@ -120,12 +165,35 @@
         <% @tree_logs.each do |log| %>
           <tr style="border-bottom: 1px solid #eee;">
             <td style="padding: 0.4rem; color: #333;"><%= log.operation_name.split("::").last %></td>
-            <td style="padding: 0.4rem;"><%= log.reference_id %></td>
-            <td style="padding: 0.4rem;"><%= log.parent_reference_id.presence || "nil" %></td>
-            <td style="padding: 0.4rem;"><%= log.root_reference_id %></td>
+            <td style="padding: 0.4rem; color: #666;"><%= log.try(:execution_index) || "nil" %></td>
+            <td style="padding: 0.4rem; color: #999;"><%= log.reference_id %></td>
+            <td style="padding: 0.4rem; color: #999;"><%= log.parent_reference_id || "nil (root)" %></td>
+            <td style="padding: 0.4rem; color: #999;"><%= log.root_reference_id %></td>
           </tr>
         <% end %>
       </tbody>
     </table>
   </details>
+
+  <%# Encrypted params explainer section %>
+  <% if @tree_logs.any?(&:has_encrypted_params?) %>
+    <details style="margin-top: 1rem;">
+      <summary style="cursor: pointer; font-size: 0.82rem; color: #5a5aaa; padding: 0.4rem 0;">
+        🔒 How to decrypt encrypted params (Rails console)
+      </summary>
+      <pre style="margin-top: 0.5rem; font-size: 0.78rem; background: #f5f5f5; padding: 0.75rem 1rem; border-radius: 4px; overflow: auto; border: 1px solid #eee;"><code># In Rails console:
+log = OperationLog.find(<%= @tree_logs.find(&:has_encrypted_params?)&.id %>)
+params = JSON.parse(log.params_data)
+
+# Any key with { "$easyop_encrypted" => "..." } can be decrypted:
+encrypted_keys = params.select { |_, v| v.is_a?(Hash) && v["$easyop_encrypted"] }.keys
+# => <%= @tree_logs.find(&:has_encrypted_params?)&.encrypted_params_keys&.inspect %>
+
+# Decrypt one:
+Easyop::SimpleCrypt.decrypt_marker(params["credit_card_number"])
+# => the original plaintext value
+
+# Requires EASYOP_RECORDING_SECRET to be set (same as when it was encrypted)</code></pre>
+    </details>
+  <% end %>
 <% end %>

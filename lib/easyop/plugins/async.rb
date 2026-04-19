@@ -45,6 +45,21 @@ module Easyop
         #   MyOp.call_async(email: "x@y.com", wait: 5.minutes, queue: "low")
         def call_async(attrs = {}, wait: nil, wait_until: nil, queue: nil, **extra_attrs)
           merged_attrs = attrs.merge(extra_attrs)
+
+          # Testing spy — activated by Easyop::Testing::AsyncAssertions.capture_async
+          # and perform_async_inline. Capture-only mode skips the actual enqueue.
+          if (spy = Thread.current[:_easyop_async_capture])
+            spy << { operation: self, attrs: merged_attrs, queue: queue,
+                     wait: wait, wait_until: wait_until }
+            if Thread.current[:_easyop_async_capture_only]
+              return nil
+            else
+              # inline mode: call synchronously with deserialized attrs
+              deserialized = merged_attrs.transform_keys(&:to_sym)
+              return call(deserialized)
+            end
+          end
+
           _async_ensure_active_job!
           job = Easyop::Plugins::Async.job_class
           job = job.set(queue: queue || _async_default_queue)

@@ -1,0 +1,23 @@
+# frozen_string_literal: true
+
+# app/operations/application_operation.rb
+class <%= base_class %>
+  include Easyop::Operation
+
+  rescue_from ActiveRecord::RecordNotFound do |e|
+    ctx.fail!(error: "#{e.model} not found")
+  end
+
+  rescue_from ActiveRecord::RecordInvalid do |e|
+    ctx.fail!(error: e.message, errors: e.record.errors.to_h)
+  end
+
+  rescue_from StandardError do |e|
+    # Sentry.capture_exception(e)
+    ctx.fail!(error: "An unexpected error occurred")
+  end
+<%- plugins.each do |plugin| -%>
+
+  <%= plugin[:plugin_line] %>
+<%- end -%>
+end

@@ -12,6 +12,7 @@ Rails.application.routes.draw do
   resources :operation_logs,   only: [:index, :show]
   resources :event_logs,       only: [:index]
   resources :transfers,        only: [:new, :create]
+  resources :purchases,        only: [:new, :create]
 
   # Health check
   get "up" => "rails/health#show", as: :rails_health_check

@@ -1,0 +1,68 @@
+<% content_for :title, "Purchase Premium Access" %>
+
+<h1>Purchase Premium Access</h1>
+
+<p style="background: #f0f4ff; border: 1px solid #c8d4f0; padding: 0.75rem 1rem; border-radius: 4px; font-size: 0.85rem; color: #334;">
+  This form demonstrates <strong>encrypt_params</strong> in the EasyOp Recording plugin.
+  The credit card number and CVV will be <strong>encrypted at rest</strong> in the
+  <code>OperationLog.params_data</code> column using AES-256 via
+  <code>Easyop::SimpleCrypt</code>. After submitting, check
+  <%= link_to "Op Logs", operation_logs_path %> to see the encrypted marker.
+</p>
+
+<%= form_tag purchases_path, method: :post do %>
+  <label>Amount (cents — try 999 for $9.99)</label>
+  <%= number_field_tag :amount_cents, 999, min: 1 %>
+
+  <label>Tier</label>
+  <%= select_tag :tier, options_for_select([["Standard", "standard"], ["Premium", "premium"], ["Enterprise", "enterprise"]], "standard") %>
+
+  <label>Credit Card Number <small style="color:#888;">(use any 16-digit number for testing)</small></label>
+  <%= text_field_tag :credit_card_number, "4242424242424242", style: "font-family: monospace;" %>
+
+  <label>CVV</label>
+  <%= text_field_tag :cvv, "123" %>
+
+  <label>Billing ZIP <small style="color:#888;">(will be [FILTERED] in logs)</small></label>
+  <%= text_field_tag :billing_zip, "10001" %>
+
+  <div style="margin-top: 1rem;">
+    <%= submit_tag "Purchase Access →", class: "btn" %>
+    <small style="color: #888; margin-left: 1rem;">
+      After purchase, view Op Logs to see the encrypted card number and result_data.
+    </small>
+  </div>
+<% end %>
+
+<details style="margin-top: 2rem; padding: 1rem; background: #fafafa; border: 1px solid #eee; border-radius: 4px;">
+  <summary style="cursor: pointer; font-weight: bold; color: #555;">How encrypt_params works</summary>
+  <pre style="margin-top: 0.75rem; font-size: 0.8rem; background: #f5f5f5; padding: 0.75rem; border-radius: 3px; overflow: auto;"><code>class Payments::Charge < ApplicationOperation
+  params do
+    required :credit_card_number, :string
+    required :cvv, :string
+    optional :billing_zip, :string
+  end
+
+  encrypt_params :credit_card_number, :cvv  # stored as { "$easyop_encrypted" => "..." }
+  filter_params  :billing_zip               # stored as "[FILTERED]"
+  record_result  attrs: %i[payment]         # saves Payment AR ref in result_data
+
+  def call
+    ctx.payment = Payment.create!(...)
+  end
+end
+
+# What params_data looks like in the OperationLog:
+# {
+#   "user"               => { "id" => 1, "class" => "User" },
+#   "amount_cents"       => 999,
+#   "credit_card_number" => { "$easyop_encrypted" => "eyJfcm..." },
+#   "cvv"                => { "$easyop_encrypted" => "eyJfcm..." },
+#   "billing_zip"        => "[FILTERED]",
+#   "tier"               => "standard"
+# }
+
+# Decrypt for rollback or auditing:
+# Easyop::SimpleCrypt.decrypt_marker(params["credit_card_number"])
+# => "4242424242424242"</code></pre>
+</details>

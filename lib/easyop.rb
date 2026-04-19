@@ -9,6 +9,9 @@ require_relative "easyop/operation"
 require_relative "easyop/flow_builder"
 require_relative "easyop/flow"
 
+# Optional utilities — require explicitly when needed:
+# require "easyop/simple_crypt"   # MessageEncryptor wrapper for encrypted recording
+
 # Optional plugins — not auto-required
 # require_relative "easyop/plugins/transactional"
 
@@ -29,7 +32,11 @@ require_relative "easyop/flow"
 # require "easyop/plugins/events"
 # require "easyop/plugins/event_handlers"
 
+require_relative "easyop/railtie" if defined?(Rails::Railtie)
+
 module Easyop
+  autoload :Testing, "easyop/testing"
+
   # Convenience: inherit from this instead of including Easyop::Operation
   # when you want a common base class for all your operations.
   #

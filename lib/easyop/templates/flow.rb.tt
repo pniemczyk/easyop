@@ -1,0 +1,20 @@
+# frozen_string_literal: true
+
+<%= class_header %>
+<%= indent %>  include Easyop::Flow
+<%= indent %>  transactional false  # each step owns its own AR transaction; remove for a flow-wide transaction
+
+<%- step_names.each do |step| -%>
+<%= indent %>  class <%= step %> < <%= base_class %>
+<%= indent %>    params do
+<%= indent %>      # required :param_name, Type
+<%= indent %>    end
+
+<%= indent %>    def call
+<%= indent %>      # TODO: implement <%= step %>
+<%= indent %>    end
+<%= indent %>  end
+
+<%- end -%>
+<%= indent %>  flow <%= step_names.join(", ") %>
+<%= class_footer %>

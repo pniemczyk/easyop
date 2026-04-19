@@ -1,0 +1,4 @@
+alice_sub:
+  email: alice@example.com
+  name: Alice Smith
+  confirmed: true

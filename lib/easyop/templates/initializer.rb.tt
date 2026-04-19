@@ -1,0 +1,32 @@
+# frozen_string_literal: true
+
+# config/initializers/easyop.rb
+<%- requires = plugins.flat_map { |p| p[:requires] }.uniq -%>
+<%- requires << "easyop/simple_crypt" if encryption -%>
+<%- requires.each do |req| -%>
+require "<%= req %>"
+<%- end -%>
+
+Easyop.configure do |c|
+  # Raise on type mismatch in development/test; warn silently in production:
+  c.strict_types = Rails.env.development? || Rails.env.test?
+<%- if encryption -%>
+
+  # Encryption secret for encrypt_params / recording_encrypt_keys.
+  # Resolution order (first non-blank wins):
+  #   1. This attr
+  #   2. ENV["EASYOP_RECORDING_SECRET"]
+  #   3. credentials.easyop.recording_secret
+  #   4. credentials.easyop_recording_secret
+  #   5. credentials.secret_key_base  (dev/test fallback — not for production)
+  c.recording_secret = ENV.fetch("EASYOP_RECORDING_SECRET") {
+    Rails.application.credentials.dig(:easyop, :recording_secret) ||
+      Rails.application.credentials.easyop_recording_secret       ||
+      Rails.application.credentials.secret_key_base
+  }
+<%- end -%>
+end
+<%- if instrumentation -%>
+
+Easyop::Plugins::Instrumentation.attach_log_subscriber
+<%- end -%>

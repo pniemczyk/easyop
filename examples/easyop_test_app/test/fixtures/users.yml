@@ -1,0 +1,27 @@
+alice:
+  email: alice@example.com
+  name: Alice Smith
+  password_digest: <%= BCrypt::Password.create("password123") %>
+  credits: 500
+  newsletter_opt_in: true
+
+bob:
+  email: bob@example.com
+  name: Bob Jones
+  password_digest: <%= BCrypt::Password.create("password123") %>
+  credits: 200
+  newsletter_opt_in: false
+
+carol:
+  email: carol@example.com
+  name: Carol White
+  password_digest: <%= BCrypt::Password.create("password123") %>
+  credits: 50
+  newsletter_opt_in: true
+
+dave:
+  email: dave@example.com
+  name: Dave Brown
+  password_digest: <%= BCrypt::Password.create("password123") %>
+  credits: 0
+  newsletter_opt_in: false

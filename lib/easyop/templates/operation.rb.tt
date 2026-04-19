@@ -1,0 +1,31 @@
+# frozen_string_literal: true
+
+<%= class_header %>
+<%- if param_names.any? -%>
+
+<%= indent %>  params do
+<%- param_names.each do |p| -%>
+<%= indent %>    required :<%= p %>
+<%- end -%>
+<%= indent %>  end
+<%- end -%>
+<%- if record_params_attrs.any? -%>
+
+<%= indent %>  record_params attrs: %i[<%= record_params_attrs.join(" ") %>]
+<%- end -%>
+<%- if record_result_attrs.any? -%>
+<%= indent %>  record_result attrs: %i[<%= record_result_attrs.join(" ") %>]
+<%- end -%>
+<%- if encrypt_keys.any? -%>
+
+<%= indent %>  encrypt_params :<%= encrypt_keys.join(", :") %>
+<%- end -%>
+<%- if filter_keys.any? -%>
+
+<%= indent %>  filter_params :<%= filter_keys.join(", :") %>
+<%- end -%>
+
+<%= indent %>  def call
+<%= indent %>    # TODO: implement <%= class_name_full %>
+<%= indent %>  end
+<%= class_footer %>

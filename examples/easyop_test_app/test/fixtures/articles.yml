@@ -1,0 +1,12 @@
+getting_started:
+  user: alice
+  title: Getting Started with EasyOp
+  body: EasyOp wraps business logic in composable operations.
+  published: true
+  published_at: 2026-04-15 10:00:00
+
+draft_rescue:
+  user: bob
+  title: Draft Rescue Handlers
+  body: Use rescue_from to handle exceptions.
+  published: false

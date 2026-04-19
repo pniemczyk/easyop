@@ -10,7 +10,20 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_14_130000) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_18_100001) do
+  create_table "access_grants", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.datetime "granted_at", null: false
+    t.integer "payment_id", null: false
+    t.datetime "revoked_at"
+    t.string "tier", default: "standard", null: false
+    t.datetime "updated_at", null: false
+    t.integer "user_id", null: false
+    t.index ["payment_id"], name: "index_access_grants_on_payment_id"
+    t.index ["user_id", "tier"], name: "index_access_grants_on_user_id_and_tier"
+    t.index ["user_id"], name: "index_access_grants_on_user_id"
+  end
+
   create_table "articles", force: :cascade do |t|
     t.text "body", null: false
     t.datetime "created_at", null: false
@@ -47,19 +60,34 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_14_130000) do
     t.datetime "created_at", null: false
     t.float "duration_ms"
     t.string "error_message"
+    t.integer "execution_index"
     t.string "operation_name"
     t.text "params_data"
-    t.datetime "performed_at"
-    t.boolean "success"
-    t.datetime "updated_at", null: false
-    t.string "root_reference_id"
-    t.string "reference_id"
     t.string "parent_operation_name"
     t.string "parent_reference_id"
+    t.datetime "performed_at"
+    t.string "reference_id"
     t.text "result_data"
-    t.index ["root_reference_id"], name: "index_operation_logs_on_root_reference_id"
-    t.index ["reference_id"], name: "index_operation_logs_on_reference_id", unique: true
+    t.string "root_reference_id"
+    t.boolean "success"
+    t.datetime "updated_at", null: false
+    t.index ["parent_reference_id", "execution_index"], name: "index_operation_logs_on_parent_ref_and_exec_index"
     t.index ["parent_reference_id"], name: "index_operation_logs_on_parent_reference_id"
+    t.index ["reference_id"], name: "index_operation_logs_on_reference_id", unique: true
+    t.index ["root_reference_id"], name: "index_operation_logs_on_root_reference_id"
+  end
+
+  create_table "payments", force: :cascade do |t|
+    t.integer "amount_cents", null: false
+    t.datetime "created_at", null: false
+    t.datetime "refunded_at"
+    t.string "status", default: "pending", null: false
+    t.string "transaction_id", null: false
+    t.datetime "updated_at", null: false
+    t.integer "user_id", null: false
+    t.index ["status"], name: "index_payments_on_status"
+    t.index ["transaction_id"], name: "index_payments_on_transaction_id", unique: true
+    t.index ["user_id"], name: "index_payments_on_user_id"
   end
 
   create_table "subscriptions", force: :cascade do |t|
@@ -83,6 +111,9 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_14_130000) do
     t.index ["email"], name: "index_users_on_email", unique: true
   end
 
+  add_foreign_key "access_grants", "payments"
+  add_foreign_key "access_grants", "users"
   add_foreign_key "articles", "users"
   add_foreign_key "broadcasts", "articles"
+  add_foreign_key "payments", "users"
 end

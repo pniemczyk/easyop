@@ -1,0 +1,31 @@
+# frozen_string_literal: true
+
+class CreateOperationLogs < ActiveRecord::Migration[<%= rails_version %>]
+  def change
+    create_table :operation_logs do |t|
+      t.string   :operation_name, null: false
+      t.boolean  :success,        null: false
+      t.string   :error_message
+      t.text     :params_data          # JSON — input keys; sensitive values replaced / encrypted
+      t.text     :result_data          # JSON — captured output (record_result DSL)
+      t.float    :duration_ms
+      t.datetime :performed_at,   null: false
+
+      # Flow tracing — reconstruct the full call tree:
+      t.string   :root_reference_id
+      t.string   :reference_id
+      t.string   :parent_operation_name
+      t.string   :parent_reference_id
+      t.integer  :execution_index
+    end
+
+    add_index :operation_logs, :operation_name
+    add_index :operation_logs, :performed_at
+    add_index :operation_logs, :success
+    add_index :operation_logs, :root_reference_id
+    add_index :operation_logs, :reference_id,         unique: true
+    add_index :operation_logs, :parent_reference_id
+    add_index :operation_logs, %i[parent_reference_id execution_index],
+              name: "index_oplogs_on_parent_ref_and_exec_idx"
+  end
+end

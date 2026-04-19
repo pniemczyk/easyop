@@ -40,6 +40,7 @@
       <% end %>
       <% if logged_in? %>
         <%= link_to "Transfer Credits", new_transfer_path %>
+        <%= link_to "Purchase Access", new_purchase_path %>
         <%= link_to "New Article", new_article_path %>
         <%= button_to "Logout (#{current_user.name})", session_path, method: :delete, form: { style: "display:inline" } %>
       <% else %>
