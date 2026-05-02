@@ -78,6 +78,12 @@ class SchemaTest < Minitest::Test
 
   # ── type aliases ─────────────────────────────────────────────────────────────
 
+  def test_type_mismatch_without_strict_types_warns_to_stderr
+    op = make_op { params { required :age, Integer } }
+    Easyop.configure { |c| c.strict_types = false }
+    assert_output(nil, /Type mismatch/) { op.call(age: 'not-an-int') }
+  end
+
   def test_boolean_type_alias_accepts_true_and_false
     op = make_op { params { required :flag, :boolean } }
     Easyop.configure { |c| c.strict_types = true }
@@ -85,10 +91,22 @@ class SchemaTest < Minitest::Test
     assert_predicate op.call(flag: false), :success?
   end
 
+  def test_boolean_type_alias_rejects_non_boolean
+    op = make_op { params { required :flag, :boolean } }
+    Easyop.configure { |c| c.strict_types = true }
+    assert_predicate op.call(flag: 'yes'), :failure?
+  end
+
   def test_string_type_alias
     op = make_op { params { required :msg, :string } }
     Easyop.configure { |c| c.strict_types = true }
     assert_predicate op.call(msg: 'hi'), :success?
+  end
+
+  def test_string_type_alias_rejects_non_string
+    op = make_op { params { required :msg, :string } }
+    Easyop.configure { |c| c.strict_types = true }
+    assert_predicate op.call(msg: 42), :failure?
   end
 
   def test_integer_type_alias
@@ -152,5 +170,25 @@ class SchemaTest < Minitest::Test
     end
     result = op.call
     assert_predicate result, :success?
+  end
+
+  # ── FieldSchema#fields ────────────────────────────────────────────────────────
+
+  def test_field_schema_fields_returns_defined_fields
+    require 'easyop/schema'
+    schema = Easyop::FieldSchema.new
+    schema.required(:email, String)
+    schema.optional(:role, String, default: 'user')
+    assert_equal 2, schema.fields.length
+    assert_equal [:email, :role], schema.fields.map(&:name)
+  end
+
+  def test_field_schema_fields_returns_dup
+    require 'easyop/schema'
+    schema = Easyop::FieldSchema.new
+    schema.required(:name, String)
+    original_count = schema.fields.length
+    schema.fields << :extra  # mutate the returned copy
+    assert_equal original_count, schema.fields.length
   end
 end

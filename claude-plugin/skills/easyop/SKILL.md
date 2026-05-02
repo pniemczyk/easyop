@@ -1,7 +1,7 @@
 ---
 name: easyop
 description: Use when working with the easyop gem — operations, flows, ctx.fail!, hooks, schema DSL, skip_if, rollback, plugins (Recording, Async, Transactional, Events), or the Ruby service-object / command pattern.
-version: 0.1.7
+version: 0.5.0
 ---
 
 # EasyOp Skill
@@ -268,6 +268,143 @@ RSpec.describe CreateUser do
 end
 ```
 
+## Durable Flows — `subject` Triggers Durability
+
+`Easyop::Flow` auto-detects one of three execution modes:
+
+| Mode | Trigger | Returns |
+|------|---------|---------|
+| 1 — sync | No `subject`, no `.async` step | `Ctx` (inline) |
+| 2 — fire-and-forget async | No `subject`, has `.async` step | `Ctx`; async steps enqueued via `klass.call_async` |
+| 3 — durable | **`subject` declared** | `FlowRun` (DB-backed suspend/resume) |
+
+`subject` is the **only** durability trigger. An `.async` step alone (without `subject`) is Mode 2, never Mode 3.
+
+### Mode 2 — fire-and-forget async
+
+```ruby
+class RegisterAndNotify
+  include Easyop::Flow
+
+  # SendWelcomeEmail must have plugin Easyop::Plugins::Async installed
+  flow CreateUser,
+       SendWelcomeEmail.async,   # enqueued via call_async — flow continues immediately
+       AssignTrial
+end
+
+ctx = RegisterAndNotify.call(email: 'a@b.com')  # => Ctx; SendWelcomeEmail in the job queue
+ctx.success?  # => true
+```
+
+### Mode 3 — durable (suspend-and-resume)
+
+Requires `require "easyop/persistent_flow"` in your initializer (raises
+`Easyop::Flow::DurableSupportNotLoadedError` if omitted). Also requires
+`require "easyop/scheduler"` for the DB scheduler that drives async steps.
+
+```ruby
+# config/initializers/easyop.rb
+require 'easyop/scheduler'
+require 'easyop/persistent_flow'
+
+class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # ← the only durability trigger; binds a polymorphic AR reference
+
+  # SendWelcomeEmail and SendNudge must have plugin Easyop::Plugins::Async installed
+  flow CreateAccount,
+       SendWelcomeEmail.async,
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| ctx[:skip_nudge] },
+       RecordComplete
+end
+
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+flow_run.id       # => AR id
+flow_run.status   # => 'running'
+flow_run.subject  # => the User AR record
+```
+
+#### Lifecycle controls
+
+```ruby
+flow_run.cancel!   # => status: 'cancelled'; cancels any scheduled tasks
+flow_run.pause!    # => status: 'paused'
+flow_run.resume!   # => re-advances from the last completed step
+flow_run.succeeded?
+flow_run.failed?
+```
+
+#### Exception policies (durable flows only)
+
+```ruby
+# These step-builder options require plugin Easyop::Plugins::Async on the operation class
+flow CreateAccount,
+     ChargeCard.on_exception(:cancel!),                              # fail flow on any error
+     SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3)  # retry up to 3 times
+```
+
+### Free composition — durable sub-flows promote outer
+
+When an outer flow embeds a durable (subject-bearing) sub-flow, the sub-flow's
+steps are **flattened** into the outer's `_resolved_flow_steps`, auto-promoting
+the outer to Mode 3:
+
+```ruby
+class InnerDurable
+  include Easyop::Flow
+  subject :user
+  flow StepA, StepB.async(wait: 1.day)
+end
+
+class Outer
+  include Easyop::Flow
+  flow Op1, InnerDurable, Op2   # Outer auto-promotes to Mode 3
+end
+
+run = Outer.call(user: user)    # => FlowRun (not Ctx)
+```
+
+Mode-2 (async-only) sub-flows stay encapsulated as a single step — they do **not**
+promote the outer to Mode 3.
+
+### New error classes (v0.5)
+
+| Error | When raised |
+|-------|-------------|
+| `Easyop::Flow::DurableSupportNotLoadedError` | `subject` declared but `require "easyop/persistent_flow"` was not called |
+| `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | A whole flow class is wrapped in `.async` (e.g. `Inner.async(wait:)`) — use `Easyop::Scheduler.schedule_at` instead |
+| `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | A `StepBuilder` modifier (`.skip_if`, `.async`, etc.) wraps a durable sub-flow |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `.on_exception` or `.tags` used in a non-durable (Mode 1/2) flow |
+
+### Deprecations (removed in v0.6)
+
+- `include Easyop::PersistentFlow` — use `include Easyop::Flow` + `subject :foo`
+- `.start!(attrs)` — use `.call(attrs)`
+
+### Testing durable flows
+
+```ruby
+include Easyop::Testing   # auto-includes PersistentFlowAssertions
+
+def test_onboarding_flow
+  run = OnboardSubscriber.call(user: user, plan: :pro)
+
+  speedrun_flow(run)   # advances all async steps without real delays
+
+  assert_flow_status    run, :succeeded
+  assert_step_completed run, SendWelcomeEmail
+  assert_step_completed run, SendNudge
+  assert_step_skipped   run, SendNudge   # if ctx[:skip_nudge] was true
+end
+```
+
+AR model setup via `rails g easyop:install` — generates migrations for
+`easy_flow_runs` and `easy_flow_run_steps` tables plus the two model files.
+
+---
+
 ## Plugins (opt-in)
 
 All plugins are opt-in. Require and activate:
@@ -299,11 +436,37 @@ Optional flow-tracing columns: `root_reference_id`, `reference_id`, `parent_oper
 Optional `result_data :text` column — use the `record_result` DSL to selectively persist ctx output (attrs form, block form, or symbol/method form). Plugin-level default via `record_result:` install option; class-level DSL overrides it. Backward-compatible — column silently skipped when absent.
 
 ### Async
-Adds `.call_async(attrs, wait:, wait_until:, queue:)`. Serializes AR objects by ID.
+
+Adds a fluent builder API and classic `.call_async`. Serializes AR objects by ID.
+
+**Operation-level enqueue** (outside a flow):
 
 ```ruby
-MyOp.call_async(user: @user, amount: 100)          # enqueue now
-MyOp.call_async(user: @user, wait: 5.minutes)      # enqueue with delay
+# Fluent (preferred):
+Reports::GeneratePDF.async.call(report_id: 123)
+Reports::GeneratePDF.async(wait: 10.minutes).call(report_id: 123)
+Reports::GeneratePDF.async(queue: :low, wait_until: 1.day.from_now).call(report_id: 123)
+
+# Classic (still works — zero deprecation pressure):
+MyOp.call_async(user: @user, amount: 100)
+MyOp.call_async(user: @user, wait: 5.minutes)
+```
+
+**Step-builder DSL in flow declarations** — the fluent chain methods (`.async`,
+`.skip_if`, `.skip_unless`, `.on_exception`, `.tags`, `.wait`) are available on
+any operation class **only after** `plugin Easyop::Plugins::Async` is installed on
+that class (or a parent it inherits from). An operation used as a bare step (no
+modifiers) inside a `flow` declaration does NOT require the plugin.
+
+```ruby
+# ✅ SendWelcomeEmail has plugin Easyop::Plugins::Async — .async is valid
+flow CreateUser,
+     SendWelcomeEmail.async,
+     SendNudge.async(wait: 3.days).skip_if { |ctx| !ctx[:newsletter] },
+     RecordComplete
+
+# ❌ If SendWelcomeEmail does NOT have plugin Easyop::Plugins::Async, calling
+#    SendWelcomeEmail.async raises NoMethodError
 ```
 
 Use the `queue` DSL to declare the default queue on a class without re-declaring the plugin:
@@ -458,7 +621,8 @@ end
 
 - **`references/ctx.md`** — Complete Ctx API
 - **`references/operations.md`** — All Operation DSL options
-- **`references/flow.md`** — Flow, FlowBuilder, skip_if, rollback, guards
+- **`references/flow.md`** — Flow, FlowBuilder, skip_if, rollback, lambda guards, three-mode dispatch
+- **`references/durability.md`** — Durable flows deep-dive: setup, subject, runner, exception policies, testing
 - **`references/hooks-and-rescue.md`** — Hooks and rescue_from deep-dive
 - **`references/plugins.md`** — All plugins: Instrumentation, Recording, Async, Transactional, Events, EventHandlers, custom
 - **`examples/basic_operation.rb`** — Single operation patterns

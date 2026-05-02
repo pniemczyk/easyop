@@ -211,6 +211,26 @@ class PluginsEventsTest < Minitest::Test
     assert_equal 'child.event', child._emitted_events.last[:name]
   end
 
+  # ── Event ordering — fires AFTER call body ───────────────────────────────────
+
+  def test_events_fire_after_operation_call_completes
+    order  = []
+    op     = make_op { order << :call }
+    op.emits 'order.placed', on: :success
+    Easyop::Events::Registry.bus.subscribe('order.placed') { |_e| order << :event }
+    op.call
+    assert_equal [:call, :event], order
+  end
+
+  def test_events_fire_even_when_call_bang_raises_ctx_failure
+    published = []
+    Easyop::Events::Registry.bus.subscribe('order.failed') { |e| published << e }
+    op = make_op { ctx.fail! }
+    op.emits 'order.failed', on: :failure
+    assert_raises(Easyop::Ctx::Failure) { op.call! }
+    assert_equal 1, published.size
+  end
+
   # ── Publish failure does not crash operation ──────────────────────────────────
 
   def test_publish_failure_does_not_crash_operation

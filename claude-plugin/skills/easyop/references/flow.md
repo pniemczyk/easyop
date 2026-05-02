@@ -92,12 +92,12 @@ The lambda receives `ctx` and the step runs only if it returns truthy.
 
 ## Choosing Between skip_if and Lambda Guards
 
-| | `skip_if` (on class) | Lambda guard (in flow) |
+| | `skip_if` on class | Lambda guard (in flow) |
 |---|---|---|
 | Location | On the operation | In the flow list |
-| Reuse | Automatic — always applies in any flow | Manual — redeclare in each flow |
-| Readability | Flow reads as a plain list | Flow shows the condition inline |
-| Best for | When the condition is intrinsic to the step | One-off, flow-specific conditions |
+| Reuse | Automatic in any flow | Manual |
+| Readability | Flow is a plain list | Shows condition inline |
+| Best for | Intrinsic step condition | One-off flow condition |
 
 ## Nested Flows
 
@@ -174,6 +174,9 @@ ctx = ProcessCheckout.prepare
 ctx.success?  # check after-the-fact if needed
 ```
 
+Note: `prepare` is only supported for Mode-1 and Mode-2 (non-durable) flows.
+Calling `prepare` on a durable flow (one with `subject` declared) raises `ArgumentError`.
+
 ## Flow vs. Direct Call
 
 ```ruby
@@ -181,10 +184,75 @@ ctx.success?  # check after-the-fact if needed
 result = ProcessCheckout.call(attrs)
 result.on_success { |ctx| ... }  # post-call callback on ctx
 
-# Calls flow with pre-registered callbacks:
+# Calls flow with pre-registered callbacks (Mode 1 / Mode 2 only):
 ProcessCheckout.prepare
   .on_success { |ctx| ... }
   .call(attrs)
 ```
 
-Both return ctx. The FlowBuilder fires its callbacks synchronously inside `.call`.
+Mode 1 and Mode 2 flows return `Ctx`; Mode 3 (durable) flows return `FlowRun`.
+
+## Three Execution Modes
+
+`Easyop::Flow` auto-selects the execution mode:
+
+| Mode | Declaration | Returns |
+|------|-------------|---------|
+| 1 — sync | No `subject`, no `.async` step | `Ctx` |
+| 2 — fire-and-forget async | No `subject`, has `.async` step | `Ctx` (async steps enqueued via `call_async`) |
+| 3 — durable | `subject` declared | `FlowRun` (DB-backed) |
+
+`subject` is the **only** durability trigger. `.async` steps alone do NOT make a flow durable.
+
+## Durability mode (`subject`)
+
+```ruby
+require 'easyop/scheduler'
+require 'easyop/persistent_flow'
+
+class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # ← the only durability trigger
+
+  flow CreateAccount,
+       SendWelcomeEmail.async,                     # deferred via DB scheduler
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| ctx[:skip_nudge] },
+       RecordComplete
+end
+
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+# => FlowRun AR record; status: 'running'
+
+flow_run.cancel!     # stop execution
+flow_run.resume!     # re-advance from last completed step
+flow_run.succeeded?  # => true when all steps finished
+```
+
+## Free composition
+
+When a non-durable outer flow embeds a durable (subject-bearing) sub-flow, the
+sub-flow's steps are **flattened** into the outer's `_resolved_flow_steps`, which
+auto-promotes the outer to Mode 3:
+
+```ruby
+class InnerDurable
+  include Easyop::Flow
+  subject :user
+  flow StepA, StepB.async(wait: 1.day)
+end
+
+class Outer
+  include Easyop::Flow
+  flow Op1, InnerDurable, Op2   # no subject declared, but InnerDurable has one
+end
+
+run = Outer.call(user: user)    # => FlowRun (auto-promoted to Mode 3)
+```
+
+The outer flow inherits `subject` from the first durable sub-flow found
+(`_resolved_subject` searches depth-first).
+
+Mode-2 sub-flows stay encapsulated as a single inline step — they never promote
+the outer to Mode 3.

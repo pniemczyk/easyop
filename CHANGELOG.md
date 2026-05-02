@@ -5,9 +5,113 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — Unreleased
 
 ### Added
+
+- **Unified `Easyop::Flow` API** — `include Easyop::Flow` is now the only flow module. Three execution modes are auto-detected:
+  - **Mode 1** (no `subject`, no `.async` step): pure sync → returns `Ctx`.
+  - **Mode 2** (no `subject`, has `.async` step): sync + fire-and-forget → returns `Ctx`; each async step is enqueued via `klass.call_async` (ActiveJob) and the flow continues immediately to the next step. No AR or Scheduler dependency required.
+  - **Mode 3** (`subject` declared): durable suspend-and-resume → returns `FlowRun`; async steps persist ctx and schedule re-entry via the DB scheduler.
+- **`subject` is the only durability trigger.** An async step alone (without `subject`) is fire-and-forget (Mode 2), never durable. Requires `require "easyop/persistent_flow"` in the initializer; raises `Easyop::Flow::DurableSupportNotLoadedError` with a clear message otherwise.
+- **Free composition** — any flow can embed operations *and* other flows in its `flow(...)` declaration:
+  - Mode-1/Mode-2 sub-flows run as a single inline step sharing ctx with the outer flow.
+  - Durable (subject-bearing) sub-flows are **flattened** into the outer's resolved step list via `_resolved_flow_steps`, auto-promoting the outer to Mode 3.
+  - Wrapping a durable sub-flow in step modifiers (e.g. `Inner.skip_if { ... }`) raises `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` — deferred to v0.6.
+  - Wrapping an entire flow in `.async` (e.g. `Inner.async(wait: 1.day)`) raises `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` — deferred to v0.6.
+- **`.call` returns two types by design:** `Ctx` for Modes 1 & 2, `FlowRun` for Mode 3.
+
+### Changed
+
+- **`Easyop::PersistentFlow` is now a deprecated shim.** `include Easyop::PersistentFlow` is equivalent to `include Easyop::Flow` (with backward-compat durable-mode forced on). Will be removed in v0.6.
+- **`start!` is a deprecated alias for `.call`.** Both return `FlowRun` for durable flows.
+- **Async steps in non-durable flows no longer raise.** Previously `AsyncStepRequiresPersistentFlowError` was raised; now they fire-and-forget via `call_async`. The error class is kept for one release for `rescue` compat.
+
+## [0.4.0] — Unreleased
+
+### Added
+
+- **`Easyop::PersistentFlow`** — durable multi-step orchestration that survives process restarts. Opt-in: `require "easyop/persistent_flow"`.
+
+  - `include Easyop::PersistentFlow` in any class that also declares a `flow` to get durable execution.
+  - `subject :user` macro — binds a polymorphic AR reference to the flow run (`flow_run.subject`).
+  - `start!(attrs)` class method — creates an `EasyFlowRun` row and begins execution immediately.
+  - Sync steps run inline; async steps (`step.async`) are deferred via `Easyop::Scheduler` and executed by `Easyop::PersistentFlow::PerformStepOperation`.
+  - Ctx is serialized between async boundaries using `Easyop::Scheduler::Serializer` (primitives + AR refs survive; non-serializable values drop silently — v0.5 will make this a contract).
+  - `flow_run.cancel!`, `flow_run.pause!`, `flow_run.resume!` lifecycle controls.
+  - `on_exception(:cancel!)` — fails the flow on any uncaught exception.
+  - `on_exception(:reattempt!, max_reattempts: N)` — reschedules the failing step immediately and fails the flow after `N` total attempts.
+  - `FlowRunModel` and `FlowRunStepModel` mixins for the generated AR models.
+  - `Easyop::PersistentFlow::PerformStepJob` — optional ActiveJob entry point for queue adapters.
+  - Generator support: `write_persistent_flow_migrations` and `write_persistent_flow_models` in `Easyop::Installer::Generator`.
+  - **`Easyop::Testing::PersistentFlowAssertions`** — included automatically when `Easyop::PersistentFlow` is defined: `speedrun_flow(flow_run)`, `assert_flow_status`, `assert_step_completed`, `assert_step_skipped`, `assert_step_failed`.
+  - New config attrs: `Easyop.config.persistent_flow_model` (default: `'EasyFlowRun'`), `Easyop.config.persistent_flow_step_model` (default: `'EasyFlowRunStep'`).
+  - Migration templates: `easy_flow_runs_migration.rb.tt`, `easy_flow_run_steps_migration.rb.tt`.
+  - Model templates: `flow_run_model.rb.tt`, `flow_run_step_model.rb.tt`.
+
+## [0.3.0] — Unreleased
+
+### Added
+
+- **Fluent async API (`Easyop::Operation::StepBuilder`)** — chainable, immutable builder for configuring an operation as a flow step or standalone async enqueue. Created via class-level entry points added by `Easyop::Plugins::Async`:
+
+  ```ruby
+  # Standalone async enqueue
+  Reports::GeneratePDF.async(wait: 5.minutes).call(report_id: 42)
+
+  # Inside a flow declaration
+  flow CreateUser,
+       SendWelcomeEmail.async,
+       SendNudge.async(wait: 1.day).skip_if { |ctx| !ctx[:newsletter] },
+       RecordComplete
+  ```
+
+  - `Op.async(**opts)` — marks step as async, accepts `wait:`, `queue:`.
+  - `Op.wait(duration)` — sets wait without async flag.
+  - `Op.skip_if { |ctx| ... }` — skip when block returns truthy (flow use only).
+  - `Op.skip_unless { |ctx| ... }` — skip when block returns falsy (flow use only).
+  - `Op.on_exception(policy, **opts)` — exception policy (PersistentFlow use only).
+  - `Op.tags(*list)` — additive tags (PersistentFlow use only).
+  - `.call(attrs)` — enqueues async; raises `PersistentFlowOnlyOptionsError` if flow-only opts are set.
+  - `.to_step_config` — returns frozen opts hash for the flow parser.
+  - **Immutability**: each chain method returns a new instance; opts are frozen.
+  - **Option accumulation**: scalars last-write-wins; `:tags` is additive.
+  - **`Easyop::Flow`** extended to handle `StepBuilder` entries: evaluates `skip_if`/`skip_unless` guards inline; raises `AsyncStepRequiresPersistentFlowError` if an async step appears in a plain `Flow`.
+  - **`Easyop::Testing#assert_step_builder(builder, expected)`** — verifies StepBuilder option values.
+
+## [0.2.0] — Unreleased
+
+### Changed
+
+- **Minitest-only internal test suite** — dropped the internal RSpec suite (`spec/`). All coverage is now in `test/` using Minitest. `Easyop::Testing` continues to support both Minitest and RSpec for end users. Run the suite with `bundle exec rake test`.
+- Removed `rspec` development dependency from `Gemfile` and `easyop.gemspec`.
+- Fixed unqualified `Logger` constant in `Easyop::Plugins::Instrumentation.attach_log_subscriber` (now `::Logger`).
+
+### Added
+
+- **`Easyop::Testing` module** — single `include Easyop::Testing` wires all assertion sub-modules into Minitest or RSpec automatically. Works without ActiveSupport.
+
+  - **`Easyop::Testing::Assertions`** — core operation helpers: `op_call`, `op_call!`, `assert_op_success`, `assert_op_failure` (with optional `error:` string/regexp), `assert_ctx_has`, and `stub_op` (works with both Minitest `Object#stub` and RSpec `allow().to receive()`).
+  - **`Easyop::Testing::FakeModel`** — lightweight AR-compatible spy for the Recording plugin. Pass as `model:` to avoid writing to a real database. Exposes `last_params`, `last_result`, `params_at(i)`, `result_at(i)`, `records_for(name)`, `clear!`.
+  - **`Easyop::Testing::RecordingAssertions`** — `assert_recorded_success`, `assert_recorded_failure`, `assert_params_recorded`, `assert_params_filtered`, `assert_params_encrypted`, `assert_params_not_encrypted`, `assert_result_recorded`, `assert_ar_ref_in_params`, `assert_ar_ref_in_result`, `decrypt_recorded_param`, `with_recording_secret`.
+  - **`Easyop::Testing::AsyncAssertions`** — `capture_async`, `perform_async_inline`, `assert_async_enqueued`, `assert_no_async_enqueued`, `assert_async_queue`, `assert_async_wait`.
+  - **`Easyop::Testing::EventAssertions`** — `capture_events`, `assert_event_emitted`, `assert_no_events`, `assert_event_payload`, `assert_event_source`, `assert_event_on`.
+
+- **`Easyop::Scheduler`** — DB-backed scheduler for deferred and recurring operation execution. Opt-in: `require "easyop/scheduler"`.
+
+  - `Easyop::Scheduler.schedule_at(MyOp, time, attrs, tags: [], dedup_key: nil)` — schedule an operation at an absolute time.
+  - `Easyop::Scheduler.schedule_in(MyOp, duration, attrs, ...)` — schedule relative to now.
+  - `Easyop::Scheduler.schedule_cron(MyOp, expression, attrs, ...)` — recurring schedule (requires `fugit` gem).
+  - `Easyop::Scheduler.cancel(task_id)` / `cancel_by_tag(tag)` / `cancel_by_operation(klass)` — cancellation.
+  - `Easyop::Scheduler.peek(filter)` — query pending tasks.
+  - `Easyop::Scheduler::TickJob` — ActiveJob that calls `recover_stuck!` + `run_batch!`; uses `FOR UPDATE SKIP LOCKED` on PostgreSQL, optimistic locking elsewhere.
+  - `Easyop::Scheduler::Serializer` — serialize/deserialize attrs across async boundaries (`__ar_class/__ar_id` convention for AR objects).
+  - `Easyop::Plugins::Scheduler` — operation-level plugin adding `schedule_at`, `schedule_in`, `schedule_cron`, `schedule` class methods.
+  - **`Easyop::Testing::SchedulerAssertions`** — included automatically when `Easyop::Scheduler` is defined: `assert_scheduled`, `assert_no_scheduled`, `flush_scheduler!`, `clear_scheduler!`.
+  - New config attrs: `scheduler_model`, `scheduler_batch_size`, `scheduler_lock_window`, `scheduler_stuck_threshold`, `scheduler_default_max_attempts`, `scheduler_default_backoff`, `scheduler_dead_letter_callback`.
+  - Migration template: `easy_scheduled_tasks_migration.rb.tt`. Model template: `easy_scheduled_task_model.rb.tt`. Generator methods: `write_scheduler_migration`, `write_scheduler_model`.
+
+- **Code examples** — self-contained runnable scripts in `examples/code/` (01–07) covering operations, hooks, schemas, flows, events, and recording. Each file runs with plain `ruby examples/code/NN_name.rb` and uses in-memory stubs (no Rails, no database).
 
 - **`Easyop::SimpleCrypt`** — new utility module wrapping `ActiveSupport::MessageEncryptor`. Provides `encrypt`, `decrypt`, `encrypted_marker?`, and `decrypt_marker` helpers. Raises `MissingSecretError` / `EncryptionError` / `DecryptionError`.
 

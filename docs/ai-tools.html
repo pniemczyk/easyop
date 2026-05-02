@@ -176,10 +176,54 @@ response = client.messages(
         <thead><tr><th>Prompt</th><th>What Claude generates</th></tr></thead>
         <tbody>
           <tr><td>"Create an operation that registers a new user with email validation"</td><td>Operation with <code>params</code> schema, <code>rescue_from ActiveRecord::RecordInvalid</code>, and <code>before</code> hook for normalisation</td></tr>
-          <tr><td>"Turn this checkout logic into a flow with rollback"</td><td><code>include Easyop::Flow</code> with inner-class steps, each with a <code>rollback</code> method</td></tr>
-          <tr><td>"Make this operation run in the background"</td><td>Adds <code>plugin Easyop::Plugins::Async</code> to the base class and shows <code>.call_async</code> usage</td></tr>
+          <tr><td>"Turn this checkout logic into a flow with rollback"</td><td><code>include Easyop::Flow</code> with inner-class steps, each with a <code>rollback</code> method (Mode 1 — sync)</td></tr>
+          <tr><td>"Send a welcome email in the background after a user registers"</td><td>Mode 2 fire-and-forget flow — <code>SendWelcomeEmail.async</code> step inside the flow, no <code>subject</code></td></tr>
+          <tr><td>"Build a multi-day onboarding sequence that survives restarts"</td><td>Mode 3 durable flow — <code>subject :user</code>, <code>require "easyop/persistent_flow"</code>, <code>.async(wait: 3.days)</code> steps</td></tr>
+          <tr><td>"Make this operation run in the background"</td><td>Adds <code>plugin Easyop::Plugins::Async</code> to the base class and shows <code>.async.call()</code> fluent API</td></tr>
           <tr><td>"I need an audit trail for all operations"</td><td>Adds <code>plugin Easyop::Plugins::Recording</code>, migration for <code>operation_logs</code>, and <code>recording false</code> opt-out where needed</td></tr>
           <tr><td>"Write an RSpec suite for this flow"</td><td>Unit specs for each step in isolation plus an integration spec that runs the full flow</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="flow-modes-reference">Flow Modes — Quick Reference for AI Context</h2>
+      <p>When prompting an AI to write a flow, specify which mode you need. All three modes use <code>include Easyop::Flow</code>:</p>
+
+      <pre><code class="language-ruby"># Mode 1 — Sync (default): no subject, no .async steps → returns Ctx
+class ProcessCheckout
+  include Easyop::Flow
+  flow ValidateCart, ChargePayment, CreateOrder, SendConfirmation
+end
+result = ProcessCheckout.call(attrs)   # => Easyop::Ctx
+
+# Mode 2 — Fire-and-forget async: no subject, has .async step → returns Ctx
+class RegisterAndNotify
+  include Easyop::Flow
+  flow CreateUser,
+       SendWelcomeEmail.async,    # enqueued via ActiveJob; flow continues immediately
+       AssignTrial
+end
+ctx = RegisterAndNotify.call(attrs)    # => Easyop::Ctx
+
+# Mode 3 — Durable: subject declared → returns FlowRun
+# Requires: require "easyop/scheduler" and require "easyop/persistent_flow"
+class OnboardSubscriber
+  include Easyop::Flow
+  subject :user   # &lt;-- the ONLY durability trigger
+  flow CreateAccount,
+       SendWelcomeEmail.async,
+       SendNudge.async(wait: 3.days).skip_if { |ctx| ctx[:skip_nudge] },
+       RecordComplete
+end
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)  # => FlowRun</code></pre>
+
+      <table>
+        <thead>
+          <tr><th>Declaration</th><th>Mode</th><th>Returns</th><th>Async step semantic</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>No <code>subject</code>, no <code>.async</code> step</td><td>1 — Sync</td><td><code>Ctx</code></td><td>n/a</td></tr>
+          <tr><td>No <code>subject</code>, has <code>.async</code> step</td><td>2 — Fire-and-forget</td><td><code>Ctx</code></td><td>Enqueued via <code>call_async</code> (ActiveJob)</td></tr>
+          <tr><td><code>subject</code> declared</td><td>3 — Durable</td><td><code>FlowRun</code></td><td>Suspend-and-resume; ctx persisted to DB</td></tr>
         </tbody>
       </table>
 

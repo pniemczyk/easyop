@@ -394,4 +394,254 @@ puts "  VerboseBus publish_log: #{verbose.publish_log.inspect}"
 Easyop::Events::Registry.reset!
 
 puts "\n" + "=" * 60
+puts "§17-19 — v0.5 Unified Flow API (Mode 1/2/3)"
+puts "=" * 60
+
+# ── §17. Mode 2 — fire-and-forget async ───────────────────────────────────────
+# Requires easyop/plugins/async and a minimal ActiveJob stub.
+# No `subject` declared — returns Ctx; async step enqueued via call_async.
+
+require "easyop/plugins/async"
+
+module ActiveJob
+  class Base
+    @@jobs = []
+    def self.queue_as(_q); end
+    def self.set(**opts) = Class.new { define_singleton_method(:perform_later) { |*a| ActiveJob::Base.jobs << { args: a, opts: opts } } }
+    def self.jobs;       @@jobs;   end
+    def self.clear_jobs!; @@jobs = []; end
+  end
+end
+
+class PrepareShipment
+  include Easyop::Operation
+  def call
+    ctx.shipment_id = "SHP-#{ctx[:order_id]}-#{rand(1000)}"
+    puts "  [PrepareShipment] created #{ctx.shipment_id}"
+  end
+end
+
+class SendShipmentNotification
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async, queue: "notifications"
+
+  def call
+    puts "  [SendShipmentNotification] email sent (should not print — step is async)"
+    ctx.notification_sent = true
+  end
+end
+
+class FulfillOrder
+  include Easyop::Flow
+
+  flow PrepareShipment,
+       SendShipmentNotification.async   # Mode 2: enqueued via call_async
+end
+
+puts "\n17. Mode 2 — fire-and-forget async"
+ActiveJob::Base.clear_jobs!
+result = FulfillOrder.call(order_id: 42)
+
+puts "  returns Ctx:           #{result.is_a?(Easyop::Ctx)}"
+puts "  PrepareShipment ran:   #{!result[:shipment_id].nil?}"
+puts "  notification_sent:     #{result[:notification_sent].inspect}"  # nil — step enqueued, not run
+puts "  enqueued jobs:         #{ActiveJob::Base.jobs.size}"           # 1
+puts "  job class:             #{ActiveJob::Base.jobs.first[:args][0]}"
+
+# ── §18. Mode 3 — durable suspend/resume via DB ──────────────────────────────
+# Requires easyop/persistent_flow + easyop/scheduler and in-memory stubs.
+# `subject :order` is the ONLY durability trigger.
+
+require "easyop/persistent_flow"
+require "easyop/scheduler"
+
+# --- In-memory AR stubs (no database needed) ---
+
+class FakeScope
+  include Enumerable
+  def initialize(records) = @records = records
+  def each(&blk)          = @records.each(&blk)
+  def first               = @records.first
+  def exists?             = @records.any?
+  def count               = @records.size
+  def where(*_a, **cond)
+    return self if _a.any? && cond.empty?
+    FakeScope.new(@records.select { |r| cond.all? { |k, v| r.respond_to?(k) && r.public_send(k) == v } })
+  end
+  def update_all(**attrs)
+    @records.each { |r| attrs.each { |k, v| r.public_send(:"#{k}=", v) if r.respond_to?(:"#{k}=") } }
+    @records.size
+  end
+end
+
+module ActiveRecord; class Base; end; end unless defined?(ActiveRecord)
+
+class FakeOrder < ActiveRecord::Base   # inherit so is_a?(AR::Base) → true for Serializer
+  attr_accessor :id, :email, :status
+  @@store = {}
+  def self.store = @@store
+  def self.reset! = (@@store = {})
+  def self.find(id) = @@store.fetch(id.to_i) { raise "FakeOrder #{id} not found" }
+  def self.create!(attrs)
+    id = (@@store.keys.max || 0) + 1
+    o  = new; attrs.each { |k, v| o.public_send(:"#{k}=", v) }; o.id = id
+    @@store[id] = o; o
+  end
+  def initialize; @status = 'pending'; end
+end
+
+class FakeDurableRun
+  include Easyop::PersistentFlow::FlowRunModel
+  attr_accessor :id, :flow_class, :context_data, :status, :current_step_index,
+                :subject_type, :subject_id, :started_at, :finished_at
+  @@store = []; @@ctr = 0
+  def self.store  = @@store
+  def self.reset! = (@@store = []; @@ctr = 0)
+  def self.create!(attrs)
+    obj = new; attrs.each { |k, v| obj.public_send(:"#{k}=", v) }
+    @@ctr += 1; obj.id = @@ctr; @@store << obj; obj
+  end
+  def self.find(id) = @@store.find { |r| r.id == id.to_i } || raise("FakeDurableRun #{id} not found")
+  def self.where(*a, **c) = a.any? && c.empty? ? FakeScope.new(@@store) : FakeScope.new(@@store.select { |r| c.all? { |k, v| r.respond_to?(k) && r.public_send(k) == v } })
+  def initialize; @status = 'pending'; @current_step_index = 0; @context_data = '{}'; end
+  def update_columns(a) = a.each { |k, v| public_send(:"#{k}=", v) } && self
+  def reload = self
+end
+
+class FakeDurableStep
+  include Easyop::PersistentFlow::FlowRunStepModel
+  attr_accessor :id, :flow_run_id, :step_index, :operation_class, :status,
+                :attempt, :error_class, :error_message, :started_at, :finished_at
+  @@store = []; @@ctr = 0
+  def self.store  = @@store
+  def self.reset! = (@@store = []; @@ctr = 0)
+  def self.create!(attrs)
+    obj = new; attrs.each { |k, v| obj.public_send(:"#{k}=", v) }
+    @@ctr += 1; obj.id = @@ctr; @@store << obj; obj
+  end
+  def self.where(*a, **c) = a.any? && c.empty? ? FakeScope.new(@@store) : FakeScope.new(@@store.select { |r| c.all? { |k, v| r.respond_to?(k) && r.public_send(k) == v } })
+  def initialize; @status = 'running'; @attempt = 0; end
+  def update_columns(a) = a.each { |k, v| public_send(:"#{k}=", v) } && self
+end
+
+class FakeTask
+  attr_accessor :id, :operation_class, :ctx_data, :run_at, :tags, :state
+  @@store = []; @@ctr = 0
+  def self.store  = @@store
+  def self.reset! = (@@store = []; @@ctr = 0)
+  def self.connection = Struct.new(:adapter_name).new('fake_adapter')
+  def self.create!(attrs)
+    obj = new; attrs.each { |k, v| obj.public_send(:"#{k}=", v) if obj.respond_to?(:"#{k}=") }
+    @@ctr += 1; obj.id ||= @@ctr; obj.state ||= 'scheduled'; @@store << obj; obj
+  end
+  def self.where(*a, **c) = a.any? && c.empty? ? FakeScope.new(@@store) : FakeScope.new(@@store.select { |r| c.respond_to?(:all?) && c.all? { |k, v| r.respond_to?(k) && r.public_send(k) == v } })
+  def initialize; @state = 'scheduled'; end
+  def update_columns(a) = a.each { |k, v| public_send(:"#{k}=", v) if respond_to?(:"#{k}=") } && self
+end
+
+unless ''.respond_to?(:constantize)
+  class String; def constantize; Object.const_get(self); end; end
+end
+unless Time.respond_to?(:current)
+  class Time; def self.current; now; end; end
+end
+
+Easyop.configure do |c|
+  c.persistent_flow_model      = 'FakeDurableRun'
+  c.persistent_flow_step_model = 'FakeDurableStep'
+  c.scheduler_model            = 'FakeTask'
+end
+
+# Speedrun helper — drives pending scheduled tasks synchronously (test helper)
+def speedrun_durable(flow_run, max: 20)
+  max.times do
+    break if flow_run.terminal?
+    task = FakeTask.store.find { |t|
+      t.state == 'scheduled' &&
+        Easyop::Scheduler::Serializer.deserialize(t.ctx_data)[:flow_run_id] == flow_run.id
+    }
+    break unless task
+    task.state = 'running'
+    Easyop::PersistentFlow::Runner.execute_scheduled_step!(flow_run)
+  end
+  flow_run.reload
+end
+
+class ValidateOrder
+  include Easyop::Operation
+  def call
+    ctx.fail!(error: "invalid order") unless ctx[:order]&.status == 'pending'
+    puts "  [ValidateOrder] order #{ctx.order.id} validated"
+  end
+end
+
+class ChargeOrder
+  include Easyop::Operation
+  def call
+    ctx.order.status = 'paid'
+    puts "  [ChargeOrder] order #{ctx.order.id} charged"
+    ctx.payment_id = "PAY-#{rand(9999)}"
+  end
+end
+
+class ConfirmOrder
+  include Easyop::Operation
+  def call
+    ctx.order.status = 'confirmed'
+    puts "  [ConfirmOrder] order #{ctx.order.id} confirmed"
+  end
+end
+
+class DurableOrderFlow
+  include Easyop::Flow
+  subject :order   # Mode 3 — returns FlowRun; ctx persisted across async boundaries
+
+  flow ValidateOrder, ChargeOrder, ConfirmOrder
+end
+
+puts "\n18. Mode 3 — durable flow with subject"
+FakeDurableRun.reset!; FakeDurableStep.reset!; FakeTask.reset!; FakeOrder.reset!
+
+order = FakeOrder.create!(email: "buyer@example.com", status: "pending")
+flow_run = DurableOrderFlow.call(order: order)
+
+puts "  returns FlowRun:  #{flow_run.is_a?(FakeDurableRun)}"
+puts "  status:           #{flow_run.status}"       # succeeded
+puts "  subject_type:     #{flow_run.subject_type}" # FakeOrder
+puts "  subject_id:       #{flow_run.subject_id}"   # 1
+puts "  order status:     #{order.status}"           # confirmed
+
+# ── §19. Free composition — outer plain + inner durable → auto-promoted ────────
+
+class InnerDurableOrder
+  include Easyop::Flow
+  subject :order
+  flow ValidateOrder, ChargeOrder
+end
+
+class AuditStep
+  include Easyop::Operation
+  def call
+    puts "  [AuditStep] auditing"
+    ctx.audit_done = true
+  end
+end
+
+class OuterPlainFlow
+  include Easyop::Flow
+  flow AuditStep, InnerDurableOrder   # no subject — but inner has one
+end
+
+puts "\n19. Free composition — outer plain embeds durable inner → auto-promoted"
+FakeDurableRun.reset!; FakeDurableStep.reset!; FakeTask.reset!; FakeOrder.reset!
+
+order2 = FakeOrder.create!(email: "buyer2@example.com", status: "pending")
+result19 = OuterPlainFlow.call(order: order2)
+
+puts "  returns FlowRun:  #{result19.is_a?(FakeDurableRun)}"   # true — outer auto-promoted
+puts "  flow_class:       #{result19.flow_class}"               # OuterPlainFlow
+puts "  status:           #{result19.status}"                    # succeeded
+puts "  subject_type:     #{result19.subject_type}"              # FakeOrder
+
+puts "\n" + "=" * 60
 puts "All examples complete."

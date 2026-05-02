@@ -29,12 +29,28 @@ module Easyop
     autoload :RecordingAssertions,  "easyop/testing/recording_assertions"
     autoload :AsyncAssertions,      "easyop/testing/async_assertions"
     autoload :EventAssertions,      "easyop/testing/event_assertions"
-
+    autoload :SchedulerAssertions,       "easyop/testing/scheduler_assertions"
+    autoload :PersistentFlowAssertions,  "easyop/testing/persistent_flow_assertions"
     def self.included(base)
       base.include Easyop::Testing::Assertions
       base.include Easyop::Testing::RecordingAssertions
       base.include Easyop::Testing::AsyncAssertions
       base.include Easyop::Testing::EventAssertions
+      base.include Easyop::Testing::SchedulerAssertions     if defined?(Easyop::Scheduler)
+      base.include Easyop::Testing::PersistentFlowAssertions if defined?(Easyop::PersistentFlow)
+    end
+
+    # Assert that a StepBuilder carries the expected options.
+    #
+    #   step = SendEmail.async(wait: 1.day).skip_if { true }
+    #   assert_step_builder step, async: true, wait: 1.day, skip_if: step.opts[:skip_if]
+    def assert_step_builder(builder, expected)
+      assert_instance_of Easyop::Operation::StepBuilder, builder
+      expected.each do |key, value|
+        assert_equal value, builder.opts[key],
+                     "StepBuilder option :#{key} mismatch for #{builder.klass}. " \
+                     "Expected #{value.inspect}, got #{builder.opts[key].inspect}."
+      end
     end
   end
 end

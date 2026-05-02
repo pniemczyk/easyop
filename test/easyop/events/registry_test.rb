@@ -130,6 +130,48 @@ class RegistryTest < Minitest::Test
     Easyop::Events::Registry.bus.publish(evt)
   end
 
+  # ── _dispatch with async: true ───────────────────────────────────────────────
+
+  def test_dispatch_calls_call_async_when_async_true_and_available
+    enqueued = []
+    handler  = Class.new { include Easyop::Operation; def call; end }
+    handler.define_singleton_method(:call_async) { |attrs, **_opts| enqueued << attrs }
+
+    entry = { handler_class: handler, async: true, options: {} }
+    evt   = Easyop::Events::Event.new(name: 'order.placed', payload: { order_id: 7 })
+    Easyop::Events::Registry.send(:_dispatch, evt, entry)
+
+    assert_equal 1, enqueued.size
+    assert_equal 7, enqueued.first[:order_id]
+    assert_kind_of Hash, enqueued.first[:event_data]
+  end
+
+  def test_dispatch_falls_back_to_sync_when_call_async_unavailable
+    calls   = []
+    handler = Class.new do
+      include Easyop::Operation
+      define_method(:call) { calls << :sync }
+    end
+
+    entry = { handler_class: handler, async: true, options: {} }
+    evt   = Easyop::Events::Event.new(name: 'order.placed')
+    Easyop::Events::Registry.send(:_dispatch, evt, entry)
+
+    assert_equal [:sync], calls
+  end
+
+  def test_dispatch_passes_queue_option_to_call_async
+    received_opts = {}
+    handler = Class.new { include Easyop::Operation; def call; end }
+    handler.define_singleton_method(:call_async) { |_attrs, **opts| received_opts.merge!(opts) }
+
+    entry = { handler_class: handler, async: true, options: { queue: 'low' } }
+    evt   = Easyop::Events::Event.new(name: 'order.placed')
+    Easyop::Events::Registry.send(:_dispatch, evt, entry)
+
+    assert_equal 'low', received_opts[:queue]
+  end
+
   # ── active_support bus symbol ─────────────────────────────────────────────────
 
   def test_dot_bus_setter_with_symbol_active_support_creates_as_adapter

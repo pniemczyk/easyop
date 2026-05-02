@@ -385,7 +385,7 @@ FastOp._registered_plugins
 # (parent's plugins not listed — they are inherited via the MRO)</code></pre>
 
       <h2 id="rollback">Rollback</h2>
-      <p>Define a <code>rollback</code> method to undo side effects when a flow fails. Rollback is called by <code>Easyop::Flow</code> — it has no effect when calling an operation directly.</p>
+      <p>Define a <code>rollback</code> method to undo side effects when a flow fails. Rollback is called by <code>Easyop::Flow</code> — it has no effect when calling an operation directly. In durable flows (Mode 3), synchronous rollback still runs if <code>ctx.fail!</code> is called; however, if the flow is cancelled externally via <code>flow_run.cancel!</code>, rollback is not triggered — cancel is an administrative stop.</p>
 
       <pre><code class="language-ruby">class ChargePayment
   include Easyop::Operation

@@ -1,0 +1,3 @@
+class EasyScheduledTask < ActiveRecord::Base
+  include Easyop::Scheduler::ScheduledTaskModel
+end

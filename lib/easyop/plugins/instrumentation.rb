@@ -46,7 +46,7 @@ module Easyop
           line   = "[EasyOp] #{p[:operation]} #{status} (#{ms}ms)"
           line  += " — #{p[:error]}" if p[:error]
 
-          logger = defined?(Rails) && Rails.respond_to?(:logger) ? Rails.logger : Logger.new($stdout)
+          logger = defined?(Rails) && Rails.respond_to?(:logger) ? Rails.logger : ::Logger.new($stdout)
           if p[:success]
             logger.info line
           else

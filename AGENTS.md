@@ -63,34 +63,29 @@ lib/
         adapter.rb                 # Easyop::Events::Bus::Adapter — inheritable base for custom buses
       registry.rb                  # Easyop::Events::Registry — global bus + handler registry
 
-spec/
-  spec_helper.rb
-  easyop/
-    ctx_spec.rb                    # Ctx attribute access, fail!, callbacks, pattern matching
-    operation_spec.rb              # Operation.call / call!, inheritance, run order
-    hooks_spec.rb                  # before/after/around hook execution and inheritance
-    rescuable_spec.rb              # rescue_from, with:, block handlers, inheritance priority
-    schema_spec.rb                 # params/result DSL, required/optional, type symbols
-    flow_spec.rb                   # Flow sequential execution, rollback, guards, nesting
-    flow_builder_spec.rb           # FlowBuilder on_success/on_failure/bind_with/on
-    skip_spec.rb                   # skip_if DSL — skip predicate, rollback exclusion
-    events/
-      event_spec.rb                # Event construction, immutability, to_h
-      registry_spec.rb             # Registry bus config, register_handler, dispatch, reset!
-      bus/
-        memory_spec.rb             # Memory bus: publish/subscribe, glob patterns, thread safety
-        active_support_notifications_spec.rb
-        custom_spec.rb             # Custom bus: adapter validation, delegation
-        adapter_spec.rb            # Adapter base: _safe_invoke, _compile_pattern, memoization
-    plugins/
-      events_spec.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
-      event_handlers_spec.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
-      recording_spec.rb            # Recording plugin: persist, filter, opt-out, flow tracing, record_result DSL, filter_params DSL
-
 test/
+  test_helper.rb                   # Minitest setup, AS::Notifications stub, AR stub, EasyopTestHelper
   easyop/
+    ctx_test.rb                    # Ctx attribute access, fail!, callbacks, pattern matching
+    operation_test.rb              # Operation.call / call!, inheritance, run order
+    hooks_test.rb                  # before/after/around hook execution and inheritance
+    rescuable_test.rb              # rescue_from, with:, block handlers, inheritance priority
+    schema_test.rb                 # params/result DSL, required/optional, type symbols
+    flow_test.rb                   # Flow sequential execution, rollback, guards, nesting
+    flow_builder_test.rb           # FlowBuilder on_success/on_failure/bind_with/on
+    skip_test.rb                   # skip_if DSL — skip predicate, rollback exclusion
+    events/
+      event_test.rb                # Event construction, immutability, to_h
+      registry_test.rb             # Registry bus config, register_handler, dispatch, reset!
+      bus/
+        memory_test.rb             # Memory bus: publish/subscribe, glob patterns, thread safety
+        active_support_notifications_test.rb
+        custom_test.rb             # Custom bus: adapter validation, delegation
+        adapter_test.rb            # Adapter base: _safe_invoke, _compile_pattern, memoization
     plugins/
-      recording_test.rb            # Minitest mirror of recording_spec.rb
+      events_test.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
+      event_handlers_test.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
+      recording_test.rb            # Recording plugin: persist, filter, opt-out, flow tracing, record_result DSL, filter_params DSL
 
 examples/
   usage.rb                         # 16 runnable examples (ruby -Ilib examples/usage.rb)
@@ -118,7 +113,7 @@ claude-plugin/
         basic_operation.rb         # Single operation patterns
         flow.rb                    # Flow composition patterns
         rails_controller.rb        # Rails controller integration
-        testing.rb                 # RSpec test patterns
+        testing.rb                 # Minitest and RSpec test patterns
 
 AGENTS.md                          # This file
 PROPOSAL.md                        # Design rationale and comparison
@@ -131,20 +126,104 @@ README.md                          # Public documentation
 
 ```bash
 # Full suite (preferred)
-bundle exec rspec
+bundle exec rake test
 
-# Single spec file
-bundle exec rspec spec/easyop/flow_spec.rb
+# Single test file
+bundle exec rake test TEST=test/easyop/flow_test.rb
 
-# Single example by description
-bundle exec rspec spec/easyop/flow_spec.rb -e "rollback"
+# Single test by name (substring match)
+bundle exec rake test TEST=test/easyop/flow_test.rb TESTOPTS="-n /rollback/"
 
 # Run usage examples (integration smoke test)
 ruby -Ilib examples/usage.rb
 ```
 
-Tests use **RSpec 3** with **SimpleCov** for coverage reporting. There are no
+Tests use **Minitest** with **SimpleCov** for coverage reporting. There are no
 external runtime dependencies — no database, no Rails.
+
+---
+
+## Three-mode dispatch (v0.5)
+
+`Easyop::Flow` auto-selects one of three execution modes. The dispatch lives in
+`lib/easyop/flow.rb` inside `ClassMethods#call`:
+
+```ruby
+def call(attrs = {})
+  return _start_durable!(attrs) if _durable_flow?
+  super   # => Operation.call → _easyop_run → CallBehavior#call
+end
+```
+
+| Mode | `_durable_flow?` | `_persistent_flow_subject` | `.async` step | Returns |
+|------|-----------------|---------------------------|---------------|---------|
+| 1 — sync | false | nil | no | `Ctx` |
+| 2 — fire-and-forget async | false | nil | yes | `Ctx` |
+| 3 — durable | true | set | any | `FlowRun` |
+
+`_durable_flow?` is true when any of the following hold:
+1. `@_persistent_flow_subject` is set (own `subject` declaration).
+2. `@_persistent_flow_compat` is true (set by `include Easyop::PersistentFlow` shim).
+3. Any embedded sub-flow (recursively) has `_durable_flow? == true`.
+
+### `_resolved_flow_steps` — recursive flatten
+
+`ClassMethods#_resolved_flow_steps` builds the effective step list used by both
+`CallBehavior#call` (Mode 1/2) and `Runner.advance!` (Mode 3). For durable
+sub-flows, `_resolved_flow_steps` recurses into the sub-flow and splices its steps
+inline. Mode-2 sub-flows stay as single entries.
+
+Caching: the result is memoized in `@_resolved_flow_steps` on each class.
+
+### `subject` precedence rule
+
+`ClassMethods#_resolved_subject` returns the effective subject key:
+1. Own `_persistent_flow_subject` first.
+2. First durable sub-flow found by depth-first iteration of `_flow_steps`.
+
+This key is used in `_start_durable!` to set `subject_type`/`subject_id` on the
+`FlowRun` record.
+
+### New error classes (v0.5)
+
+| Constant | Location | When raised |
+|----------|----------|-------------|
+| `Easyop::Flow::DurableSupportNotLoadedError` | `flow.rb` | `subject` declared but `require "easyop/persistent_flow"` omitted |
+| `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | `flow.rb` | Whole flow class wrapped in `.async` (e.g. `Inner.async(wait:)`) |
+| `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | `flow.rb` | `StepBuilder` modifier wraps a durable sub-flow |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `operation/step_builder.rb` | `.on_exception` / `.tags` used in a non-durable flow |
+
+`AsyncStepRequiresPersistentFlowError` is kept for one release for backward-compat
+`rescue` clauses — it is no longer raised internally.
+
+### Step-builder DSL requires `plugin Easyop::Plugins::Async`
+
+The class-level entry points `.async`, `.wait`, `.skip_if`, `.skip_unless`,
+`.on_exception`, and `.tags` are installed by `Easyop::Plugins::Async`. An operation
+class that does NOT have the plugin will raise `NoMethodError` if these methods are
+called. Bare steps (no modifiers) do not require the plugin.
+
+### Durable runner architecture (`lib/easyop/persistent_flow/runner.rb`)
+
+`PersistentFlow::Runner` is a plain module (no instances). Two public entry points:
+
+- **`Runner.advance!(flow_run)`** — starts or resumes a flow from
+  `current_step_index`. Runs sync steps inline; for async steps, persists ctx to
+  `context_data`, calls `Easyop::Scheduler.schedule_at(PerformStepOperation, run_at,
+  { flow_run_id: })`, and returns (flow is suspended).
+- **`Runner.execute_scheduled_step!(flow_run)`** — runs the step at
+  `current_step_index` (invoked by `PerformStepOperation` when the Scheduler fires),
+  then calls `advance!` to continue.
+
+Key private helpers:
+- `_execute_step!` — runs `instance._easyop_run(ctx, raise_on_failure: true)`;
+  on `Ctx::Failure` marks step + flow_run as `'failed'`; on other exceptions calls
+  `_apply_exception_policy!`.
+- `_apply_exception_policy!` — applies `:cancel!` or `:reattempt!` policy; on
+  `:reattempt!` reschedules via Scheduler, falls back to `'failed'` after
+  `max_reattempts` total failures (counted as `step_model.where(status: 'failed')`).
+- `_persist_ctx` / `_rebuild_ctx` — serialize/deserialize ctx via
+  `Easyop::Scheduler::Serializer`.
 
 ---
 
@@ -313,14 +392,14 @@ end
 
 ## Adding a new feature — checklist
 
-1. **Write the spec first** in `spec/easyop/<feature>_spec.rb`.
+1. **Write the test first** in `test/easyop/<feature>_test.rb`.
 2. Implement in `lib/easyop/<feature>.rb`.
 3. Require the new file in `lib/easyop.rb` in the correct load order (before
    modules that depend on it; after modules it depends on).
 4. If it's a new public API, document it in `llms/overview.md`, `llms/usage.md`,
    and update `README.md` and `PROPOSAL.md`.
 5. Add an example to `examples/usage.rb` and verify `ruby -Ilib examples/usage.rb` passes.
-6. Run `bundle exec rspec` and confirm 0 failures.
+6. Run `bundle exec rake test` and confirm 0 failures.
 
 ---
 
@@ -343,7 +422,7 @@ end
 
 | Gem | Version | Why |
 |-----|---------|-----|
-| `rspec` | `~> 3.13` | Dev: test framework |
+| `minitest` | `~> 5.25` | Dev: test framework |
 | `simplecov` | `~> 0.22` | Dev: coverage reporting |
 
 No runtime dependencies beyond Ruby stdlib.
@@ -352,11 +431,13 @@ No runtime dependencies beyond Ruby stdlib.
 
 ## Test conventions
 
-- Use `RSpec.describe` / `describe` / `it` blocks
-- Use `let`, `subject`, `before` for shared setup
-- Use `expect(...).to`, `expect(...).not_to` — not `should`
+- Test class: `FeatureTest < Minitest::Test`, include `EasyopTestHelper`
+- Test methods: `def test_<snake_case_description>`; embed the method under test: `test_dot_call_...`
+- Use `setup` / `teardown` for shared state; call `super` first/last
+- Use the most specific assertion: `assert_predicate`, `assert_equal`, `assert_raises`, etc.
 - Anonymous classes inline (`Class.new { include Easyop::Operation }`) are
   preferred for isolation — no top-level test class pollution
-- Group related specs with comment banners: `# ── rollback ────`
-- Test names describe exact behaviour: `"calls rollback in reverse order on failure"`
-- Coverage target: ≥ 95% line coverage
+- Register named constants with `set_const('MyOp', klass)` — cleaned up automatically in `teardown`
+- Group related tests with comment banners: `# ── rollback ────`
+- Test names describe exact behaviour: `test_calls_rollback_in_reverse_order_on_failure`
+- Coverage target: ≥ 88% line coverage

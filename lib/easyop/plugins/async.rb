@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require_relative '../operation/step_builder'
+
 module Easyop
   module Plugins
     # Enables async execution via ActiveJob.
@@ -71,6 +73,35 @@ module Easyop
         def _async_default_queue
           @_async_default_queue ||
             (superclass.respond_to?(:_async_default_queue) ? superclass._async_default_queue : "default")
+        end
+
+        # ── Fluent step-builder entry points ────────────────────────────────
+        # Each returns an immutable StepBuilder. Chain freely:
+        #   Op.async(wait: 1.day).skip_if { |ctx| ctx[:done] }.call(attrs)
+        #   Op.skip_unless { |ctx| ctx[:enabled] }.async(queue: :low).call(attrs)
+
+        def async(**opts)
+          Easyop::Operation::StepBuilder.new(self, async: true, **opts)
+        end
+
+        def wait(duration)
+          Easyop::Operation::StepBuilder.new(self, wait: duration)
+        end
+
+        def skip_if(&block)
+          Easyop::Operation::StepBuilder.new(self, skip_if: block)
+        end
+
+        def skip_unless(&block)
+          Easyop::Operation::StepBuilder.new(self, skip_unless: block)
+        end
+
+        def on_exception(policy, **policy_opts)
+          Easyop::Operation::StepBuilder.new(self, on_exception: policy, **policy_opts)
+        end
+
+        def tags(*list)
+          Easyop::Operation::StepBuilder.new(self, tags: list)
         end
 
         private

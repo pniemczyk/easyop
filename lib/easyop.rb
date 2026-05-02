@@ -20,6 +20,13 @@ require_relative "easyop/flow"
 # require "easyop/plugins/instrumentation"
 # require "easyop/plugins/recording"
 # require "easyop/plugins/async"
+# require "easyop/plugins/scheduler"   # operation-level scheduling helpers (requires easyop/scheduler)
+
+# DB-backed scheduler (requires ActiveRecord + a tick job configured in your queue adapter):
+# require "easyop/scheduler"
+
+# Durable multi-step flows that survive process restarts (requires easyop/scheduler):
+# require "easyop/persistent_flow"
 
 # Domain event plugins — require together or individually:
 # require "easyop/events/event"

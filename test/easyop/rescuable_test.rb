@@ -96,6 +96,48 @@ class RescuableTest < Minitest::Test
     assert_equal 'RuntimeError', result.error
   end
 
+  # ── Subclass exception matching ───────────────────────────────────────────────
+
+  def test_rescue_from_matches_subclass_exceptions
+    op = Class.new do
+      include Easyop::Operation
+      rescue_from StandardError, with: :handle_std
+      def call; raise RuntimeError, 'runtime boom'; end
+      def handle_std(e); ctx.fail!(error: "std: #{e.message}"); end
+    end
+    assert_equal 'std: runtime boom', op.call.error
+  end
+
+  # ── String-based exception class name ────────────────────────────────────────
+
+  def test_rescue_from_resolves_string_class_name
+    op = Class.new do
+      include Easyop::Operation
+      rescue_from 'ArgumentError' do |e|
+        ctx.fail!(error: "string-rescued: #{e.message}")
+      end
+      def call; raise ArgumentError, 'string class'; end
+    end
+    result = op.call
+    assert_predicate result, :failure?
+    assert_equal 'string-rescued: string class', result.error
+  end
+
+  def test_rescue_from_skips_unresolvable_string_constant
+    op = Class.new do
+      include Easyop::Operation
+      rescue_from 'NonExistentError::ThatDoesNotExist' do |_e|
+        ctx.fail!(error: 'should not reach')
+      end
+      rescue_from ArgumentError do |e|
+        ctx.fail!(error: "fallthrough: #{e.message}")
+      end
+      def call; raise ArgumentError, 'unresolvable'; end
+    end
+    result = op.call
+    assert_equal 'fallthrough: unresolvable', result.error
+  end
+
   # ── Missing :with and no block raises ArgumentError ───────────────────────────
 
   def test_rescue_from_without_with_or_block_raises

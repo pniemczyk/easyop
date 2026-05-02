@@ -125,6 +125,40 @@ class PluginsRecordingTest < Minitest::Test
     assert_equal 'TestRecordingInheritedOp', model.records.first[:operation_name]
   end
 
+  def test_parent_still_records_when_subclass_has_recording_false
+    m = FakeModel.new
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+    end
+    set_const('TestRfParentOp', parent)
+
+    child = Class.new(parent) { recording false }
+    set_const('TestRfChildOp', child)
+
+    child.call   # child has recording disabled — no record
+    parent.call  # parent must still record
+    assert_equal 1, m.records.size
+    assert_equal 'TestRfParentOp', m.records.first[:operation_name]
+  end
+
+  def test_subclass_can_reenable_recording_when_parent_disabled
+    m = FakeModel.new
+    parent = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      recording false
+    end
+    set_const('TestRfDisabledParentOp', parent)
+
+    child = Class.new(parent) { recording true }
+    set_const('TestRfReenabledChildOp', child)
+
+    child.call
+    assert_equal 1, m.records.size
+    assert_equal 'TestRfReenabledChildOp', m.records.first[:operation_name]
+  end
+
   # ── Anonymous class skips recording ──────────────────────────────────────────
 
   def test_anonymous_class_skips_recording
@@ -144,6 +178,43 @@ class PluginsRecordingTest < Minitest::Test
     op = make_op(model: bad_model) { }
     set_const('TestRecordingBadModelOp', op)
     op.call # must not raise
+  end
+
+  def test_recording_warn_logs_to_rails_logger_on_create_failure
+    warns = []
+    fake_logger = Object.new
+    fake_logger.define_singleton_method(:warn) { |msg| warns << msg }
+
+    rails_mod = Module.new do
+      define_singleton_method(:logger) { fake_logger }
+      def self.respond_to?(m, *_); m == :logger || super; end
+    end
+    set_const('Rails', rails_mod)
+
+    bad_model = FakeModel.new
+    bad_model.define_singleton_method(:create!) { |_| raise 'DB write failed' }
+
+    op = make_op(model: bad_model) { }
+    set_const('TestRecordingWarnRailsOp', op)
+    op.call  # must not raise
+
+    refute_empty warns
+    assert warns.any? { |w| w.include?('EasyOp::Recording') }
+  end
+
+  def test_recording_safe_params_returns_nil_on_serialization_error
+    m = FakeModel.new
+    op = make_op(model: m) { }
+    set_const('TestSafeParamsRescueOp', op)
+
+    instance = op.new
+    ctx_obj  = Easyop::Ctx.new(ok: true)
+    instance.instance_variable_set(:@ctx, ctx_obj)
+
+    ctx_obj.define_singleton_method(:to_h) { raise StandardError, 'serialization error' }
+
+    result = instance.send(:_recording_safe_params, ctx_obj, true)
+    assert_nil result
   end
 
   # ── Recording inside a flow also records (ensure branch) ─────────────────────
@@ -580,6 +651,31 @@ class PluginsRecordingTest < Minitest::Test
     set_const('RrNoColOp', klass)
     klass.call  # must not raise
     refute m.records.first.key?(:result_data)
+  end
+
+  # ── record_result: AR objects serialized as {id:, class:} ────────────────────
+
+  def test_record_result_serializes_ar_objects_as_id_class_hash
+    fake_ar_class = Class.new(ActiveRecord::Base) do
+      def self.name; 'FakeProduct'; end
+      attr_reader :id
+      def initialize(id); @id = id; end
+    end
+    product = fake_ar_class.new(7)
+
+    m = result_model
+    klass = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Recording, model: m
+      record_result attrs: :product
+      def call; ctx.product = ctx[:_product_ref]; end
+    end
+    set_const('RrArSerializeOp', klass)
+
+    result_model.records.clear
+    klass.call(_product_ref: product)
+    data = JSON.parse(result_model.records.first[:result_data])
+    assert_equal({ 'id' => 7, 'class' => 'FakeProduct' }, data['product'])
   end
 
   # ── record_result: serialization error is swallowed ───────────────────────────

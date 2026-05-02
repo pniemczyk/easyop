@@ -574,6 +574,165 @@ ProcessCheckout    root=aaa  ref=bbb  parent=nil
 
 ---
 
+## Testing
+
+`Easyop::Testing` is a single include that works in both Minitest and RSpec. It pulls in five assertion modules that cover every part of the library.
+
+```ruby
+# Minitest
+class MyOpTest < Minitest::Test
+  include Easyop::Testing
+end
+
+# RSpec
+RSpec.describe MyOp do
+  include Easyop::Testing
+end
+```
+
+### Core operation assertions
+
+```ruby
+ctx = op_call(RegisterUser, email: 'alice@example.com', name: 'Alice')
+assert_op_success ctx
+assert_ctx_has    ctx, user_id: 'usr_42'
+
+ctx = op_call(RegisterUser, email: nil)
+assert_op_failure ctx
+assert_op_failure ctx, error: 'Email is required'
+assert_op_failure ctx, error: /required/i
+```
+
+| Helper | Description |
+|---|---|
+| `op_call(Op, **attrs)` | Call op; always returns ctx (never raises) |
+| `op_call!(Op, **attrs)` | Call op with `.call!`; raises `Ctx::Failure` on failure |
+| `assert_op_success(ctx)` | Assert the ctx is a success |
+| `assert_op_failure(ctx, error: nil)` | Assert the ctx is a failure; optionally match error string/regexp |
+| `assert_ctx_has(ctx, key: value, ...)` | Assert specific key/value pairs exist in ctx |
+
+**Stubbing operations:**
+
+```ruby
+stub_op(Users::Register, success: false, error: 'Already exists') do
+  # code under test that calls Users::Register.call(...)
+  result = ProcessCheckout.call(user: user, cart: cart)
+  assert_op_failure result, error: 'Already exists'
+end
+```
+
+`stub_op` works with both Minitest (`Object#stub`) and RSpec (`allow().to receive()`).
+
+---
+
+### Recording plugin assertions
+
+Use `Easyop::Testing::FakeModel` as the `model:` argument when installing the Recording plugin in tests. No database required.
+
+```ruby
+model = Easyop::Testing::FakeModel.new
+
+class RegisterUser < ApplicationOperation
+  plugin Easyop::Plugins::Recording, model: model
+  # ...
+end
+
+RegisterUser.call(email: 'alice@example.com', password: 'secret')
+
+assert_recorded_success  model
+assert_params_recorded   model, :email, 'alice@example.com'
+assert_params_filtered   model, :password          # stored as "[FILTERED]"
+```
+
+**Encrypted params:**
+
+```ruby
+with_recording_secret('a-secret-key-at-least-32-bytes!!') do
+  ChargeCard.call(credit_card_number: '4111111111111111', amount_cents: 4999)
+  assert_params_encrypted model, :credit_card_number
+  card = decrypt_recorded_param(model, :credit_card_number)
+  assert_equal '4111111111111111', card
+end
+```
+
+| Helper | Description |
+|---|---|
+| `assert_recorded_success(model)` | Assert last record has `success: true` |
+| `assert_recorded_failure(model, error: nil)` | Assert last record has `success: false`; optionally match error |
+| `assert_params_recorded(model, key, value = any)` | Assert key present in `params_data`; optionally check value |
+| `assert_params_filtered(model, *keys)` | Assert keys stored as `"[FILTERED]"` |
+| `assert_params_encrypted(model, *keys)` | Assert keys stored as `{"$easyop_encrypted"=>"..."}` marker |
+| `assert_params_not_encrypted(model, *keys)` | Assert keys are NOT encrypted |
+| `assert_result_recorded(model, key, value = any)` | Assert key present in `result_data`; optionally check value |
+| `assert_ar_ref_in_params(model, key, class_name:, id: nil)` | Assert AR object serialized as `{class, id}` in params |
+| `assert_ar_ref_in_result(model, key, class_name:, id: nil)` | Assert AR object serialized as `{class, id}` in result |
+| `decrypt_recorded_param(model, key)` | Decrypt and return plaintext for an encrypted param |
+| `with_recording_secret(secret) { }` | Set recording secret for the duration of a block |
+
+`FakeModel` also exposes `model.last`, `model.last_params`, `model.last_result`, `model.records_for("OpName")`, `model.params_at(i)`, `model.result_at(i)`, and `model.clear!`.
+
+---
+
+### Async plugin assertions
+
+```ruby
+calls = capture_async do
+  Newsletter::SendBroadcast.async.call(email: 'alice@example.com')
+end
+
+assert_async_enqueued calls, Newsletter::SendBroadcast, with: { email: 'alice@example.com' }
+assert_async_queue    calls, Newsletter::SendBroadcast, queue: 'default'
+```
+
+Use `perform_async_inline` to run async calls synchronously in integration tests:
+
+```ruby
+perform_async_inline do
+  Newsletter::SendBroadcast.async.call(email: 'alice@example.com')
+end
+# operation already ran; assert on side effects
+```
+
+| Helper | Description |
+|---|---|
+| `capture_async { }` | Capture `.async.call` / `.call_async` calls without enqueuing; returns array of call hashes |
+| `perform_async_inline { }` | Run `.async.call` / `.call_async` calls synchronously (no job queue) |
+| `assert_async_enqueued(calls, Op, with: nil)` | Assert op was captured, optionally checking attrs subset |
+| `assert_no_async_enqueued(calls, Op = nil)` | Assert no async calls (or none for a specific op) |
+| `assert_async_queue(calls, Op, queue:)` | Assert the queue name used |
+| `assert_async_wait(calls, Op, wait: nil, wait_until: nil)` | Assert the `wait:` or `wait_until:` value |
+
+Each entry in the `calls` array is `{ operation:, attrs:, queue:, wait:, wait_until: }`.
+
+---
+
+### Events plugin assertions
+
+```ruby
+events = capture_events do
+  PlaceOrder.call(order_id: 101, amount: 49.95)
+end
+
+assert_event_emitted events, 'order.placed'
+assert_event_payload events, 'order.placed', order_id: 101, amount: Float
+assert_event_source  events, 'order.placed', 'PlaceOrder'
+assert_no_events     events, 'order.failed'
+```
+
+Pass a specific bus as the first argument to `capture_events` when not using the global registry bus.
+
+| Helper | Description |
+|---|---|
+| `capture_events(bus = nil) { }` | Subscribe to all events during the block; returns `Event` array |
+| `assert_event_emitted(events, name)` | Assert an event with the given name was emitted |
+| `assert_no_events(events)` | Assert no events were emitted at all |
+| `assert_no_events(events, name)` | Assert a specific event was NOT emitted |
+| `assert_event_payload(events, name, **kv)` | Assert payload key/value pairs; values may be Class for type-check |
+| `assert_event_source(events, name, source)` | Assert the emitting operation class name |
+| `assert_event_on(OpClass, name, :trigger)` | Assert the `:on` trigger declared on the operation (`:success`, `:failure`, `:always`) |
+
+---
+
 ## `prepare` — Pre-registered Callbacks
 
 `FlowClass.prepare` returns a `FlowBuilder` that accumulates callbacks before executing the flow. The `flow` class method is reserved for declaring steps — `prepare` is the clear, unambiguous entry point for callback registration.
@@ -651,6 +810,242 @@ class MyOp < ApplicationOperation
   end
 end
 ```
+
+---
+
+## Scheduler — Deferred Execution
+
+`Easyop::Scheduler` is a DB-backed scheduler that defers operation execution to a future time. It requires a `easy_scheduled_tasks` table and a recurring `TickJob`.
+
+```ruby
+# Gemfile / config/application.rb
+require "easyop/scheduler"   # opt-in
+
+# Generate the migration and model:
+# bin/rails generate easyop:install --scheduler
+```
+
+### One-off scheduling
+
+```ruby
+# Schedule 24 hours from now
+Easyop::Scheduler.schedule_in(Newsletter::Send, 24.hours, { list_id: 7 })
+
+# Schedule at an exact time
+Easyop::Scheduler.schedule_at(Reports::GeneratePDF, Date.tomorrow.noon, { report_id: 1 })
+
+# Tag for grouped cancellation
+Easyop::Scheduler.schedule_in(Subscription::Renew, 30.days, { user_id: 42 },
+                               tags: ["user:42", "subscription:renewal"])
+```
+
+### Cancellation
+
+```ruby
+Easyop::Scheduler.cancel(task.id)
+Easyop::Scheduler.cancel_by_tag("user:42")
+Easyop::Scheduler.cancel_by_operation(Newsletter::Send)
+```
+
+### Operation-level plugin
+
+```ruby
+class Subscription::Renew < ApplicationOperation
+  plugin Easyop::Plugins::Scheduler
+
+  def call; ...; end
+end
+
+Subscription::Renew.schedule_in(30.days, user: user)
+```
+
+### Testing
+
+```ruby
+include Easyop::Testing
+
+def test_renewal_scheduled
+  Subscription::Renew.schedule_in(30.days, user: user)
+  assert_scheduled Subscription::Renew, tags: ["user:#{user.id}"]
+end
+
+def test_flush
+  flush_scheduler!   # calls Easyop::Scheduler.tick_now!
+end
+```
+
+---
+
+## Fluent Async API
+
+`Easyop::Plugins::Async` adds chainable class-level entry points that return an immutable `StepBuilder`. Chain freely — order does not matter; scalars last-write-wins; `:tags` accumulates.
+
+```ruby
+# Standalone async enqueue (equivalent to call_async)
+Reports::GeneratePDF.async(wait: 5.minutes).call(report_id: 42)
+
+# Inside a flow declaration
+flow CreateUser,
+     SendWelcomeEmail.async,
+     SendNudge.async(wait: 3.days).skip_if { |ctx| !ctx[:newsletter] },
+     RecordComplete
+```
+
+Available entry points (all return a `StepBuilder`):
+
+| Method | Description |
+|---|---|
+| `Op.async(**opts)` | Mark async; accepts `wait:`, `queue:` |
+| `Op.wait(duration)` | Delay without async flag |
+| `Op.skip_if { |ctx| ... }` | Skip when block is truthy (flow only) |
+| `Op.skip_unless { |ctx| ... }` | Skip when block is falsy (flow only) |
+| `Op.on_exception(policy, **opts)` | Exception policy (durable flow only — when `subject` is declared) |
+| `Op.tags(*list)` | Additive tags (durable flow only — when `subject` is declared) |
+
+`wait:`, `wait_until:`, `queue:`, and `at:` are valid in **both** durable (suspend-and-resume) and Mode-2 fire-and-forget flows.
+
+Calling `.call(attrs)` on a builder with durable-only opts raises `PersistentFlowOnlyOptionsError`.
+
+---
+
+## Durable Flows — `subject` Triggers Durability
+
+`Easyop::Flow` supports three execution modes, selected automatically:
+
+| Declaration | Async step semantic | Returns |
+|---|---|---|
+| No `subject`, no `.async` step | n/a | `Ctx` (sync inline) |
+| No `subject`, has `.async` step | **Fire-and-forget**: enqueued via `call_async` (ActiveJob); flow continues immediately | `Ctx` |
+| **`subject` declared** | **Suspend-and-resume**: ctx persisted, scheduled via DB scheduler, flow halts until scheduled time | `FlowRun` |
+
+`subject` is the **only** durability trigger. An async step on its own (without `subject`) is fire-and-forget, not durable.
+
+### Mode 2 — Fire-and-forget async
+
+The `.async` step is **enqueued** via ActiveJob and the flow moves on immediately to the next step — it does **not** wait for the async step to finish. Steps after `.async` run before the async step completes.
+
+```ruby
+class RegisterAndNotify
+  include Easyop::Flow
+
+  flow CreateUser,           # 1. runs now, inline
+       SendWelcomeEmail.async, # 2. job enqueued — flow does NOT wait
+       AssignTrial            # 3. runs now, before SendWelcomeEmail executes
+end
+
+# Execution order inside .call:
+#   CreateUser runs inline
+#   SendWelcomeEmail is pushed to the job queue ← does not block
+#   AssignTrial runs inline  ← runs immediately, email not sent yet
+#
+# Later, in a background worker:
+#   SendWelcomeEmail executes
+#
+ctx = RegisterAndNotify.call(email: "a@b.com")
+# ctx is returned now; SendWelcomeEmail may not have run yet
+ctx.success?  # => true
+```
+
+Use Mode 2 when the async step is a side-effect that does not affect the steps that follow it (sending an email, enqueuing a notification). If steps after it need its result, use Mode 3.
+
+### Mode 3 — Durable suspend-and-resume
+
+With `subject` declared the flow **suspends** at each `.async` step, persists the ctx to the database, and **resumes from that exact point** only after the background job completes. Steps after `.async` do not run until the async step has finished.
+
+```ruby
+require "easyop/scheduler"       # prerequisite
+require "easyop/persistent_flow" # opt-in; raises DurableSupportNotLoadedError if omitted
+
+class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # ← durability trigger; ctx is persisted to DB
+
+  flow CreateAccount,                                    # 1. runs inline
+       SendWelcomeEmail.async,                           # 2. flow SUSPENDS here
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| ctx[:skip_nudge] },    # 4. flow SUSPENDS again (3 days later)
+       RecordComplete                                    # 5. runs inline after nudge finishes
+end
+
+# Execution timeline:
+#   .call → CreateAccount runs → flow suspends, job scheduled for SendWelcomeEmail
+#   (background job runs) → SendWelcomeEmail executes → flow resumes
+#   → flow suspends again, job scheduled 3 days out for SendNudge
+#   (3 days later, background job runs) → SendNudge executes → flow resumes
+#   → RecordComplete runs inline → flow status: "succeeded"
+#
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+flow_run.id       # → AR id
+flow_run.status   # → "running" (suspended, waiting for SendWelcomeEmail job)
+flow_run.subject  # → the User AR record
+```
+
+**Key difference from Mode 2:** In Mode 3, `RecordComplete` runs only after `SendWelcomeEmail` (and `SendNudge`) have actually executed. In Mode 2, `AssignTrial` runs before `SendWelcomeEmail` finishes.
+
+| | Mode 2 (fire-and-forget) | Mode 3 (durable) |
+|---|---|---|
+| Next step waits for async? | **No** — runs immediately | **Yes** — suspends until job completes |
+| Returns | `Ctx` | `FlowRun` (AR model) |
+| Ctx persisted to DB? | No | Yes — after every step |
+| Requires `subject`? | No | Yes |
+| Use when | Async is a side-effect; later steps don't need its result | Later steps depend on async result, or you need retry/resume |
+
+### Lifecycle
+
+```ruby
+flow_run.cancel!  # → status: "cancelled", cancels any scheduled tasks
+flow_run.pause!   # → status: "paused"
+flow_run.resume!  # → re-advances from the last completed step
+```
+
+### Exception policies
+
+```ruby
+flow CreateAccount,
+     ChargeCard.on_exception(:cancel!),                         # fail the flow on any error
+     SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3)  # retry up to 3 times
+```
+
+### Free composition
+
+Any flow can embed other flows in its `flow(...)` declaration. Mode-2 sub-flows run as a single inline step. Durable (subject-bearing) sub-flows are flattened into the outer's step list, auto-promoting the outer to Mode 3:
+
+```ruby
+class InnerDurable
+  include Easyop::Flow
+  subject :user
+  flow StepA, StepB.async(wait: 1.day)
+end
+
+class Outer
+  include Easyop::Flow
+  flow Op1, InnerDurable, Op2   # Outer auto-promotes to Mode 3
+end
+
+run = Outer.call(user: user)    # → FlowRun
+```
+
+### Testing
+
+```ruby
+include Easyop::Testing   # includes PersistentFlowAssertions automatically
+
+def test_onboarding_flow
+  run = OnboardSubscriber.call(user: user, plan: :pro)
+
+  # Advance all async steps without waiting
+  speedrun_flow(run)
+
+  assert_flow_status     run, :succeeded
+  assert_step_completed  run, SendWelcomeEmail
+  assert_step_completed  run, SendNudge
+end
+```
+
+### Backward compatibility
+
+`include Easyop::PersistentFlow` and `.start!(attrs)` continue to work as deprecated aliases. They will be removed in v0.6.
 
 ---
 
@@ -1072,7 +1467,7 @@ Options: `on_error: :raise` (default) | `:collect` | `:halt`; `transaction: fals
 
 ### Plugin: Async
 
-Adds `.call_async` to any operation class, enqueuing execution as an ActiveJob. Requires ActiveJob (included with Rails).
+Adds async enqueue to any operation class via ActiveJob. Requires ActiveJob (included with Rails).
 
 ```ruby
 require "easyop/plugins/async"
@@ -1082,26 +1477,29 @@ class Newsletter::SendBroadcast < ApplicationOperation
 end
 ```
 
-**Enqueue immediately:**
+#### Enqueueing — fluent form (preferred)
+
+```ruby
+Newsletter::SendBroadcast.async.call(subject: "Hello", body: "World")
+Newsletter::SendBroadcast.async(wait: 10.minutes).call(subject: "Hello", body: "World")
+Newsletter::SendBroadcast.async(wait_until: Date.tomorrow.noon).call(attrs)
+Newsletter::SendBroadcast.async(queue: "low_priority").call(attrs)
+```
+
+The fluent form returns an `Easyop::Operation::StepBuilder`. Calling `.call(attrs)` on it delegates to `call_async`, so all existing guarantees (serialization, test spy, Recording plugin integration) are preserved.
+
+#### Enqueueing — classic form (still works, no deprecation)
 
 ```ruby
 Newsletter::SendBroadcast.call_async(subject: "Hello", body: "World")
-```
-
-**With scheduling:**
-
-```ruby
-# Run after a delay
 Newsletter::SendBroadcast.call_async(attrs, wait: 10.minutes)
-
-# Run at a specific time
 Newsletter::SendBroadcast.call_async(attrs, wait_until: Date.tomorrow.noon)
-
-# Override the queue at call time
 Newsletter::SendBroadcast.call_async(attrs, queue: "low_priority")
 ```
 
-**`queue` DSL** — declare the default queue directly on a class (or a shared base class) instead of at plugin install time:
+#### `queue` DSL
+
+Declare or override the default queue directly on a class:
 
 ```ruby
 class Weather::BaseOperation < ApplicationOperation
@@ -1113,18 +1511,18 @@ class Weather::CleanupExpiredDays < Weather::BaseOperation
 end
 ```
 
-The `queue` setting is inherited by subclasses and can be overridden at any level. Accepts `Symbol` or `String`. A per-call `queue:` argument to `.call_async` always takes precedence.
+The `queue` setting is inherited by subclasses. A per-call `queue:` argument always takes precedence.
 
 **ActiveRecord objects** are serialized by `(class, id)` and re-fetched in the job:
 
 ```ruby
-# This works — Article is serialized as { "__ar_class" => "Article", "__ar_id" => 42 }
-Newsletter::SendBroadcast.call_async(article: @article, subject: "Hello")
+Newsletter::SendBroadcast.async.call(article: @article, subject: "Hello")
+# Article serialized as { "__ar_class" => "Article", "__ar_id" => 42 }
 ```
 
 Only pass serializable values: `String`, `Integer`, `Float`, `Boolean`, `nil`, `Hash`, `Array`, or `ActiveRecord::Base`.
 
-The plugin defines `Easyop::Plugins::Async::Job` lazily (on first call to `.call_async`) so you can require the plugin before ActiveJob loads.
+The plugin defines `Easyop::Plugins::Async::Job` lazily (on first call) so you can require the plugin before ActiveJob loads.
 
 ---
 
@@ -1614,6 +2012,23 @@ ProcessCheckout.prepare
 
 ## Running Examples
 
+`examples/code/` contains self-contained scripts — no Rails, no database — that run with a plain `ruby` invocation:
+
+| File | Feature |
+|---|---|
+| `01_basic_operation.rb` | `include Easyop::Operation`, `ctx`, `.call` / `.call!` |
+| `02_hooks.rb` | `before`, `after`, `around` hooks |
+| `03_rescue_from.rb` | `rescue_from` exception handling |
+| `04_schema.rb` | `params` / `result` typed schemas |
+| `05_flow.rb` | Flow composition, rollback, `skip_if`, lambda guards |
+| `06_events.rb` | Events plugin — `emits`, `on`, `capture_events` |
+| `07_recording.rb` | Recording plugin — `filter_params`, `encrypt_params`, `record_result` |
+```bash
+ruby examples/code/01_basic_operation.rb
+```
+
+The top-level quick reference:
+
 ```
 ruby examples/usage.rb
 ```
@@ -1673,11 +2088,82 @@ bin/rails server -p 3001
 Seed accounts: `admin@ticketflow.com` / `password123` (admin), `user@ticketflow.com` / `password123` (customer).
 Discount codes: `SAVE10` (10% off), `FLAT20` ($20 off), `VIP50` (50% off).
 
-## Running Specs
+## Running Tests
 
 ```
-bundle exec rspec
+bundle exec rake test
 ```
+
+---
+
+## Developer Dashboard — `easyop-ui`
+
+[**easyop-ui**](https://github.com/pniemczyk/easyop/tree/main/easyop-ui) is a companion mountable Rails engine that provides a zero-configuration developer dashboard. Add it to any Rails app and open `/easyop` in a browser — no configuration required.
+
+### Features
+
+| Feature | Description |
+|---|---|
+| **Operation Log Browser** | Paginated table with filters (name, status, date); per-record detail + full call-tree visualization |
+| **Flow Registry** | Lists every `Easyop::Flow` class discovered at runtime; shows execution mode (1/2/3), subject, and step count |
+| **Live DAG Visualization** | Mermaid flowchart generated server-side from the live flow composition on every request; no build step |
+| **Flow Runs** | Browse durable `EasyFlowRun` records; inspect step timeline, context snapshot; trigger reattempt / cancel |
+
+### Installation
+
+```ruby
+# Gemfile
+gem 'easyop-ui'
+```
+
+```ruby
+# config/routes.rb
+mount Easyop::UI::Engine, at: '/easyop'
+```
+
+### Configuration
+
+```ruby
+# config/initializers/easyop_ui.rb
+Easyop::UI.configure do |c|
+  c.enable_operation_logs = true
+  c.enable_flow_index     = true
+  c.enable_dag_viewer     = true
+  c.enable_flow_runs      = true   # requires easyop/persistent_flow
+
+  c.authenticate_with { |request| request.env['warden'].user&.admin? }
+
+  c.title    = 'My App — Easyop Dashboard'
+  c.per_page = 50
+end
+```
+
+---
+
+## DAG Rake Tasks
+
+The core `easyop` gem ships rake tasks for generating DAG diagrams from the CLI, without requiring `easyop-ui`.
+
+```bash
+# Export all flow DAGs as HTML → tmp/easyop_dags/index.html
+rake easyop:dag:generate
+
+# Single flow only
+rake easyop:dag:generate FLOW=FulfillOrder
+
+# Custom output directory
+rake easyop:dag:generate OUTPUT=public/dags
+
+# Print Mermaid definition to stdout (pipe to file, mermaid-cli, etc.)
+rake easyop:dag:print[FulfillOrder]
+
+# List all discovered Easyop::Flow classes with mode and step count
+rake easyop:dag:list
+```
+
+The generated HTML is a self-contained file using [Mermaid.js](https://mermaid.js.org/) from CDN — open it in any browser. No Mermaid CLI, no build tools.
+
+**Guard lambda nodes** (bare `Proc` entries in `flow`) are rendered as diamond decision nodes. **Embedded sub-flows** appear as labeled subgraphs with their own internal nodes.
 
 ---
 
@@ -1732,6 +2218,7 @@ See the **[AI Tools docs page](https://pniemczyk.github.io/easyop/ai-tools.html)
 | `Easyop::Rescuable` | `rescue_from` DSL |
 | `Easyop::Skip` | `skip_if` DSL for conditional step execution in flows |
 | `Easyop::Schema` | `params`/`result` typed schema DSL |
+| `Easyop::SimpleCrypt` | `ActiveSupport::MessageEncryptor` wrapper; `encrypt`, `decrypt`, `encrypt_marker`, `decrypt_marker` |
 
 ### Plugins (opt-in)
 
@@ -1740,11 +2227,22 @@ See the **[AI Tools docs page](https://pniemczyk.github.io/easyop/ai-tools.html)
 | `Easyop::Plugins::Base` | `easyop/plugins/base` | Abstract base — inherit to build custom plugins |
 | `Easyop::Plugins::Instrumentation` | `easyop/plugins/instrumentation` | Emits `"easyop.operation.call"` via `ActiveSupport::Notifications` |
 | `Easyop::Plugins::Recording` | `easyop/plugins/recording` | Persists every execution to an ActiveRecord model |
-| `Easyop::Plugins::Async` | `easyop/plugins/async` | Adds `.call_async` via ActiveJob with AR object serialization |
+| `Easyop::Plugins::Async` | `easyop/plugins/async` | Enqueue operations as background jobs via ActiveJob; `call_async`, `queue` DSL |
 | `Easyop::Plugins::Async::Job` | (created lazily) | The ActiveJob class that deserializes and runs the operation |
 | `Easyop::Plugins::Transactional` | `easyop/plugins/transactional` | Wraps operation in an AR/Sequel transaction; `transactional false` to opt out |
 | `Easyop::Plugins::Events` | `easyop/plugins/events` | Emits domain events after execution; `emits` DSL with `on:`, `payload:`, `guard:` |
 | `Easyop::Plugins::EventHandlers` | `easyop/plugins/event_handlers` | Subscribes an operation to handle domain events; `on` DSL with glob patterns |
+
+### Testing (`require 'easyop/testing'`)
+
+| Class/Module | Description |
+|---|---|
+| `Easyop::Testing` | Top-level include — pulls in all assertion modules automatically |
+| `Easyop::Testing::Assertions` | `op_call`, `op_call!`, `stub_op`, `assert_op_success`, `assert_op_failure`, `assert_ctx_has` |
+| `Easyop::Testing::FakeModel` | In-memory AR-compatible spy for the Recording plugin |
+| `Easyop::Testing::RecordingAssertions` | `assert_params_recorded`, `assert_params_filtered`, `assert_params_encrypted`, `decrypt_recorded_param`, … |
+| `Easyop::Testing::AsyncAssertions` | `capture_async`, `perform_async_inline`, `assert_async_enqueued`, `assert_async_wait`, … |
+| `Easyop::Testing::EventAssertions` | `capture_events`, `assert_event_emitted`, `assert_event_payload`, `assert_event_source`, … |
 
 ### Domain Events Infrastructure
 

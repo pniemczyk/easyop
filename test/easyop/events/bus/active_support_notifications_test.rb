@@ -36,6 +36,17 @@ class BusActiveSupNotificationsTest < Minitest::Test
     assert_includes instrumented, 'order.placed'
   end
 
+  def test_publish_includes_source_and_payload_in_as_notification_payload
+    received_payload = nil
+    ActiveSupport::Notifications.subscribe('order.placed') do |_name, _s, _f, _id, payload|
+      received_payload = payload
+    end
+    ev = Easyop::Events::Event.new(name: 'order.placed', payload: { order_id: 42 }, source: 'TestOp')
+    bus.publish(ev)
+    assert_equal 'TestOp',          received_payload[:source]
+    assert_equal({ order_id: 42 }, received_payload[:payload])
+  end
+
   # ── subscribe reconstructs Easyop::Events::Event ────────────────────────────
 
   def test_subscribe_yields_easyop_event_on_matching_publish
@@ -45,6 +56,13 @@ class BusActiveSupNotificationsTest < Minitest::Test
     assert_equal 1, received.size
     assert_instance_of Easyop::Events::Event, received.first
     assert_equal 'order.placed', received.first.name
+  end
+
+  def test_subscribe_passes_payload_through_to_reconstructed_event
+    received = nil
+    bus.subscribe('order.placed') { |e| received = e }
+    bus.publish(event('order.placed', order_id: 7))
+    assert_equal({ order_id: 7 }, received.payload)
   end
 
   # ── glob patterns converted to Regexp for AS ─────────────────────────────────

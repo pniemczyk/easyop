@@ -59,6 +59,12 @@ class BusAdapterTest < Minitest::Test
     assert second
   end
 
+  # ── adapter inherits Bus::Base ────────────────────────────────────────────────
+
+  def test_adapter_is_subclass_of_bus_base
+    assert_kind_of Easyop::Events::Bus::Base, adapter
+  end
+
   # ── _compile_pattern caches and converts globs ────────────────────────────────
 
   def test_compile_pattern_converts_glob_to_regexp
@@ -69,6 +75,21 @@ class BusAdapterTest < Minitest::Test
     assert_equal 2, received.size
   end
 
+  def test_compile_pattern_exact_string_anchored
+    r = adapter.send(:_compile_pattern, 'order.placed')
+    assert_match r, 'order.placed'
+    refute_match r, 'order.placed.v2'
+    refute_match r, 'xorder.placed'
+  end
+
+  def test_compile_pattern_double_glob_matches_multi_segment
+    r = adapter.send(:_compile_pattern, 'warehouse.**')
+    assert_match r, 'warehouse.stock.low'
+    assert_match r, 'warehouse.alert.fire.east'
+    refute_match r, 'warehouse'
+    refute_match r, 'other.warehouse.stock'
+  end
+
   def test_compile_pattern_passes_regexp_through_unchanged
     received = []
     adapter.subscribe(/\Aorder\..*\z/) { |e| received << e.name }
@@ -76,9 +97,19 @@ class BusAdapterTest < Minitest::Test
     assert_equal ['order.placed'], received
   end
 
+  def test_compile_pattern_memoizes_same_pattern
+    r1 = adapter.send(:_compile_pattern, 'order.*')
+    r2 = adapter.send(:_compile_pattern, 'order.*')
+    assert_same r1, r2
+  end
+
+  def test_compile_pattern_different_patterns_not_conflated
+    r1 = adapter.send(:_compile_pattern, 'order.*')
+    r2 = adapter.send(:_compile_pattern, 'order.**')
+    refute_equal r1, r2
+  end
+
   def test_compile_pattern_caches_result
-    # Calling compile_pattern twice returns the same Regexp object (via cache)
-    # We test indirectly: subscribe twice with same string pattern and both should match
     count = 0
     adapter.subscribe('a.*') { count += 1 }
     adapter.subscribe('a.*') { count += 1 }

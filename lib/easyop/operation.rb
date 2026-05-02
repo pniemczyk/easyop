@@ -52,6 +52,7 @@ module Easyop
       def _registered_plugins
         @_registered_plugins ||= []
       end
+
     end
 
     # ── Instance API ─────────────────────────────────────────────────────────

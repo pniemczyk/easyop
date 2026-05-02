@@ -224,6 +224,13 @@ class CtxTest < Minitest::Test
     ctx.rollback! # must not raise
   end
 
+  def test_hash_callbacks_are_chainable
+    ctx = Easyop::Ctx.new
+    results = []
+    ctx.on_success { results << :success }.on_failure { results << :failure }
+    assert_equal [:success], results
+  end
+
   # ── deconstruct_keys (pattern matching) ──────────────────────────────────────
 
   def test_hash_deconstruct_keys_includes_success_and_failure_flags
@@ -240,6 +247,15 @@ class CtxTest < Minitest::Test
     assert h.key?(:a)
     assert h.key?(:success)
     refute h.key?(:b)
+  end
+
+  def test_hash_deconstruct_keys_works_with_case_in
+    ctx = Easyop::Ctx.new(name: 'Alice')
+    result = case ctx
+             in { success: true, name: String => n } then "Hello, #{n}"
+             in { success: false } then 'failed'
+             end
+    assert_equal 'Hello, Alice', result
   end
 
   # ── method_missing (dynamic attribute access) ─────────────────────────────────

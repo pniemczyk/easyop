@@ -68,6 +68,51 @@ class OperationTest < Minitest::Test
     assert_predicate result, :success?
   end
 
+  # ── .call accepts pre-built Ctx ──────────────────────────────────────────────
+
+  def test_dot_call_accepts_pre_built_ctx
+    op_klass = Class.new do
+      include Easyop::Operation
+      def call; ctx.output = ctx.input.upcase; end
+    end
+    pre_ctx = Easyop::Ctx.new(input: 'world')
+    result  = op_klass.call(pre_ctx)
+    assert_same pre_ctx, result
+    assert_equal 'WORLD', result.output
+  end
+
+  # ── rescue_from: handler without ctx.fail! still succeeds ────────────────────
+
+  def test_dot_call_bang_rescue_without_fail_allows_success
+    op_klass = Class.new do
+      include Easyop::Operation
+      rescue_from ArgumentError do |e|
+        ctx.message = "rescued: #{e.message}"
+      end
+      def call; raise ArgumentError, 'caught'; end
+    end
+    result = op_klass.call!
+    assert_predicate result, :success?
+    assert_equal 'rescued: caught', result.message
+  end
+
+  # ── rescue_from: subclass inherits parent handlers ────────────────────────────
+
+  def test_subclass_inherits_parent_rescue_handlers
+    base = Class.new do
+      include Easyop::Operation
+      rescue_from RuntimeError do |e|
+        ctx.fail!(error: "caught: #{e.message}")
+      end
+    end
+    child = Class.new(base) do
+      def call; raise RuntimeError, 'from child'; end
+    end
+    result = child.call
+    assert_predicate result, :failure?
+    assert_equal 'caught: from child', result.error
+  end
+
   # ── plugin DSL ───────────────────────────────────────────────────────────────
 
   def test_dot_plugin_records_registered_plugins

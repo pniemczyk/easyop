@@ -66,6 +66,29 @@ class PluginsTransactionalTest < Minitest::Test
     assert_equal 'bad', result.error
   end
 
+  def test_ctx_failure_propagates_through_transaction_block
+    rolled_back = false
+    saved_ar = ::ActiveRecord.const_get(:Base)
+    custom_ar = Module.new do
+      define_singleton_method(:transaction) do |&blk|
+        blk.call
+      rescue Easyop::Ctx::Failure
+        rolled_back = true
+        raise
+      end
+      define_singleton_method(:reset_test_state!) { }
+    end
+    ::ActiveRecord.const_set(:Base, custom_ar)
+    begin
+      op = make_op { ctx.fail!(error: 'bad') }
+      result = op.call
+      assert_predicate result, :failure?
+      assert rolled_back, 'Ctx::Failure must propagate through transaction block for rollback'
+    ensure
+      ::ActiveRecord.const_set(:Base, saved_ar)
+    end
+  end
+
   # ── Raises when no AR or Sequel ───────────────────────────────────────────────
 
   def test_raises_when_no_ar_or_sequel
@@ -82,5 +105,61 @@ class PluginsTransactionalTest < Minitest::Test
       include Easyop::Plugins::Transactional
     end
     assert klass._transactional_enabled?
+  end
+
+  def test_plugin_dsl_registers_in_registered_plugins
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::Transactional
+    end
+    plugins = op._registered_plugins.map { |p| p[:plugin] }
+    assert_includes plugins, Easyop::Plugins::Transactional
+  end
+
+  # ── inheritance edge cases ────────────────────────────────────────────────────
+
+  def test_subclass_can_disable_when_parent_enabled
+    parent = make_op { }
+    child  = Class.new(parent) do
+      transactional false
+      define_method(:call) { }
+    end
+    child.call
+    assert_equal 0, ::ActiveRecord::Base.tx_count
+  end
+
+  def test_parent_unaffected_by_subclass_transactional_false
+    parent = make_op { }
+    child  = Class.new(parent) { transactional false }
+    parent.call
+    assert_equal 1, ::ActiveRecord::Base.tx_count
+  end
+
+  # ── before/after hooks run inside transaction ─────────────────────────────────
+
+  def test_before_hook_runs_inside_transaction
+    order  = []
+    saved_ar = ::ActiveRecord.const_get(:Base)
+    o = order
+    custom_ar = Module.new do
+      define_singleton_method(:transaction) do |&blk|
+        o << :tx_open; blk.call; o << :tx_close
+      end
+      define_singleton_method(:reset_test_state!) { }
+    end
+    ::ActiveRecord.const_set(:Base, custom_ar)
+    begin
+      op = Class.new do
+        include Easyop::Operation
+        include Easyop::Plugins::Transactional
+      end
+      op.before { o << :before }
+      op.after  { o << :after }
+      op.define_method(:call) { o << :call }
+      op.call
+      assert_equal [:tx_open, :before, :call, :after, :tx_close], order
+    ensure
+      ::ActiveRecord.const_set(:Base, saved_ar)
+    end
   end
 end

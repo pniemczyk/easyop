@@ -88,3 +88,4 @@ Once installed, Claude knows:
 7. How to add and configure all four plugins (Instrumentation, Recording, Async, Transactional)
 8. How to build a custom plugin inheriting from `Easyop::Plugins::Base`
 9. How to write RSpec specs for operations and flows
+10. Durable Flows — three-mode dispatch (`subject` triggers Mode 3 / FlowRun), free composition, exception policies, testing with `speedrun_flow`

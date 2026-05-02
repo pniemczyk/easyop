@@ -251,18 +251,234 @@ end</code></pre>
   .call(attrs)</code></pre>
 
       <h2 id="call-vs-call-bang">.call vs .call! on Flows</h2>
-      <p>Flows support the same two entry points as single operations:</p>
+      <p>Flows support the same two entry points as single operations. The return type depends on the execution mode:</p>
 
-      <pre><code class="language-ruby"># .call — returns ctx, never raises on ctx.fail!
+      <pre><code class="language-ruby"># .call — Mode 1 &amp; 2: returns ctx, never raises on ctx.fail!
 result = ProcessCheckout.call(attrs)
 result.success?  # check result
 
-# .call! — raises Easyop::Ctx::Failure on failure
+# .call — Mode 3 (durable, subject declared): returns FlowRun, not Ctx
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+flow_run.status  # => "running"
+
+# .call! — raises Easyop::Ctx::Failure on failure (Modes 1 &amp; 2)
 begin
   result = ProcessCheckout.call!(attrs)
 rescue Easyop::Ctx::Failure => e
   e.ctx.error  # => the error message from whichever step failed
 end</code></pre>
+
+      <h2 id="mode-1-sync">Mode 1: Sync Chain</h2>
+      <p>When a flow has no <code>subject</code> declaration and no <code>.async</code> step, it runs every operation synchronously inline and returns a <code>Ctx</code>. This is the default behavior described throughout this page.</p>
+
+      <pre><code class="language-ruby">class ProcessCheckout
+  include Easyop::Flow
+
+  flow ValidateCart,
+       ApplyCoupon,
+       ChargePayment,
+       CreateOrder,
+       SendConfirmation
+end
+
+result = ProcessCheckout.call(user: current_user, cart: current_cart)
+# => Easyop::Ctx
+result.success?  # => true
+result.order     # => #&lt;Order id=42&gt;</code></pre>
+
+      <h2 id="mode-2-fire-and-forget">Mode 2: Fire-and-Forget Async</h2>
+      <p>When a flow has no <code>subject</code> declaration but at least one step decorated with <code>.async</code>, the flow <strong>enqueues</strong> the async step via ActiveJob and moves on immediately — it does <strong>not</strong> wait for the async step to finish. Steps that come after <code>.async</code> in the flow run before the async step executes.</p>
+
+      <pre><code class="language-ruby">class RegisterAndNotify
+  include Easyop::Flow
+
+  flow CreateUser,              # 1. runs inline, right now
+       SendWelcomeEmail.async,  # 2. job pushed to queue — flow does NOT wait
+       AssignTrial              # 3. runs inline, before SendWelcomeEmail executes
+end
+
+# Execution order inside .call:
+#   CreateUser      → runs inline
+#   SendWelcomeEmail → job enqueued  ← does not block; email not sent yet
+#   AssignTrial     → runs inline    ← runs immediately, before the email lands
+#
+# Later, in a background worker:
+#   SendWelcomeEmail → executes
+#
+ctx = RegisterAndNotify.call(email: "alice@example.com")
+# ctx returned now; SendWelcomeEmail has not run yet
+ctx.success?   # =&gt; true
+ctx.trial_set? # =&gt; true  (AssignTrial already ran)</code></pre>
+
+      <div class="callout callout-note">
+        <strong>When to use Mode 2</strong>
+        Use fire-and-forget when the async step is a side-effect that does not affect the steps that follow it — sending a confirmation email, triggering a webhook, enqueueing a heavy report. If a later step depends on the async step's result, or you need automatic retry and resume, use Mode 3 instead.
+      </div>
+
+      <div class="callout callout-warning">
+        <strong>Mode 2 restriction on durable-only options</strong>
+        Using <code>.on_exception</code> or <code>.tags</code> on a step inside a Mode-2 flow (no <code>subject</code>) raises <code>PersistentFlowOnlyOptionsError</code>. These options are only valid in Mode 3 flows.
+      </div>
+
+      <div class="callout callout-warning">
+        <strong>Async plugin required for step-builder DSL</strong>
+        Operations that use step-builder class methods — <code>.async</code>, <code>.skip_if</code>, <code>.skip_unless</code>, <code>.on_exception</code>, <code>.tags</code> — <strong>must</strong> have <code>plugin Easyop::Plugins::Async</code> installed. These methods are added by the Async plugin's <code>ClassMethods</code> module. Operations used as plain bare-class steps (no modifiers) do not need the plugin.
+      </div>
+
+      <h2 id="mode-3-durable">Mode 3: Durable Suspend-and-Resume</h2>
+      <p>Add <code>subject :model_name</code> to make a flow durable. The flow <strong>suspends</strong> at each <code>.async</code> step, persists the ctx to the database, and <strong>resumes from that exact point</strong> only after the background job completes. Steps that come after <code>.async</code> do <strong>not</strong> run until the async step has finished.</p>
+
+      <p>This is the key difference from Mode 2: in Mode 3, every step sees the completed results of all previous steps, including async ones.</p>
+
+      <h3>Setup — opt-in requires</h3>
+      <pre><code class="language-ruby">require "easyop/scheduler"       # prerequisite — DB-backed scheduler
+require "easyop/persistent_flow" # opt-in; raises DurableSupportNotLoadedError if omitted</code></pre>
+
+      <h3>AR model setup</h3>
+      <pre><code class="language-bash">bin/rails generate easyop:install --durable
+bin/rails db:migrate</code></pre>
+
+      <h3>Declaring a durable flow</h3>
+      <pre><code class="language-ruby">class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # &lt;-- durability trigger; ctx is persisted to DB
+
+  flow CreateAccount,           # 1. runs inline
+       SendWelcomeEmail.async,  # 2. flow SUSPENDS — job scheduled, .call returns here
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| ctx[:skip_nudge] },  # 4. flow SUSPENDS again (3 days later)
+       RecordComplete            # 5. runs inline after SendNudge finishes
+end
+
+# Execution timeline:
+#   .call:
+#     CreateAccount runs inline
+#     flow suspends — SendWelcomeEmail job scheduled
+#     FlowRun returned immediately with status: "running"
+#
+#   (background job fires):
+#     SendWelcomeEmail executes
+#     flow resumes — SendNudge job scheduled 3 days out
+#
+#   (3 days later, background job fires):
+#     SendNudge executes
+#     flow resumes
+#     RecordComplete runs inline
+#     FlowRun status → "succeeded"
+#
+flow_run = OnboardSubscriber.call(user: current_user, plan: :pro)
+# Returns immediately; flow is suspended waiting for SendWelcomeEmail
+flow_run.class   # =&gt; Easyop::FlowRun (ActiveRecord model)
+flow_run.status  # =&gt; "running"
+flow_run.subject # =&gt; the User AR record</code></pre>
+
+      <h3>Mode 2 vs Mode 3 at a glance</h3>
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Mode 2 — fire-and-forget</th>
+            <th>Mode 3 — durable</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Step after <code>.async</code> waits?</td>
+            <td><strong>No</strong> — runs before the async step finishes</td>
+            <td><strong>Yes</strong> — suspends until the job completes</td>
+          </tr>
+          <tr>
+            <td>Returns</td>
+            <td><code>Ctx</code></td>
+            <td><code>FlowRun</code> (AR model)</td>
+          </tr>
+          <tr>
+            <td>Ctx saved to DB?</td>
+            <td>No</td>
+            <td>Yes — after every step</td>
+          </tr>
+          <tr>
+            <td>Requires <code>subject</code>?</td>
+            <td>No</td>
+            <td>Yes</td>
+          </tr>
+          <tr>
+            <td>Retry / resume on failure?</td>
+            <td>No</td>
+            <td>Yes — <code>on_exception(:reattempt!)</code></td>
+          </tr>
+          <tr>
+            <td>Use when</td>
+            <td>Async is a side-effect; later steps don't need its result</td>
+            <td>Later steps depend on async result, or you need retry / resume</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>FlowRun lifecycle</h3>
+      <pre><code class="language-ruby">flow_run.cancel!  # =&gt; status: "cancelled"; cancels any pending scheduled tasks
+flow_run.pause!   # =&gt; status: "paused"
+flow_run.resume!  # =&gt; re-advances from the last completed step</code></pre>
+
+      <h3>Exception policies (Mode 3 only)</h3>
+      <pre><code class="language-ruby">flow CreateAccount,
+     ChargeCard.on_exception(:cancel!),                            # fail immediately on any error
+     SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3) # retry up to 3 times</code></pre>
+
+      <h3>Backward compatibility</h3>
+      <p><code>include Easyop::PersistentFlow</code> and <code>.start!(attrs)</code> continue to work as deprecated aliases and will be removed in v0.6. Prefer <code>include Easyop::Flow</code> with <code>subject</code>.</p>
+
+      <h2 id="free-composition">Free Composition</h2>
+      <p>Any flow can embed other flows as steps. The outer flow's mode is determined by the highest-ranked mode present across its step list.</p>
+
+      <table>
+        <thead>
+          <tr><th>Inner flow type</th><th>Effect on outer flow</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Mode 1 (sync, no subject)</td><td>Outer is unchanged</td></tr>
+          <tr><td>Mode 2 (async, no subject)</td><td>Async steps of inner run inline as a single step in outer</td></tr>
+          <tr><td>Mode 3 (subject declared)</td><td>Inner steps are flattened into outer; outer <strong>auto-promotes to Mode 3</strong></td></tr>
+        </tbody>
+      </table>
+
+      <pre><code class="language-ruby">class InnerDurable
+  include Easyop::Flow
+  subject :user
+  flow StepA, StepB.async(wait: 1.day)
+end
+
+class Outer
+  include Easyop::Flow
+  flow Op1, InnerDurable, Op2   # Outer auto-promotes to Mode 3
+end
+
+run = Outer.call(user: user)    # => FlowRun (not Ctx)</code></pre>
+
+      <h2 id="new-error-classes">New Error Classes (v0.5)</h2>
+      <table>
+        <thead>
+          <tr><th>Error class</th><th>When it fires</th><th>Fix</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>DurableSupportNotLoadedError</code></td>
+            <td>A flow with <code>subject</code> is called but <code>require "easyop/persistent_flow"</code> was not loaded</td>
+            <td>Add <code>require "easyop/persistent_flow"</code> (and <code>require "easyop/scheduler"</code>) to your initializer</td>
+          </tr>
+          <tr>
+            <td><code>AsyncFlowEmbeddingNotSupportedError</code></td>
+            <td>A Mode-2 (fire-and-forget) flow is embedded directly inside another flow's step list in a way that would break step ordering</td>
+            <td>Refactor: extract the inner async steps or promote the outer to Mode 3 with <code>subject</code></td>
+          </tr>
+          <tr>
+            <td><code>ConditionalDurableSubflowNotSupportedError</code></td>
+            <td>A durable (Mode 3) subflow is placed after a lambda guard in the outer flow's step list</td>
+            <td>Move the guard logic into the subflow itself using <code>skip_if</code>, or restructure the step list</td>
+          </tr>
+        </tbody>
+      </table>
 
       <footer>
         EasyOp v0.1.7 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>

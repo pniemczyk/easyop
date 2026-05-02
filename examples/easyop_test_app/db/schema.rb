@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_18_100001) do
+ActiveRecord::Schema[8.1].define(version: 2026_04_24_000000) do
   create_table "access_grants", force: :cascade do |t|
     t.datetime "created_at", null: false
     t.datetime "granted_at", null: false

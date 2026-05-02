@@ -228,7 +228,7 @@ result.deconstruct_keys([:success, :user])
 # => { success: true, user: #&lt;User&gt; }</code></pre>
 
       <h2 id="rollback-support">Rollback Support</h2>
-      <p>These methods are used internally by <code>Easyop::Flow</code>. You generally do not call them directly.</p>
+      <p>These methods are used internally by <code>Easyop::Flow</code>. You generally do not call them directly. When a flow declares <code>subject</code>, <code>.call</code> returns a <code>FlowRun</code> instead of <code>Ctx</code>. The ctx is serialized into <code>flow_run.context_data</code> and re-hydrated on resume so that each step sees the accumulated state from all previous steps.</p>
 
       <pre><code class="language-ruby"># Register an operation instance as having run successfully
 ctx.called!(op_instance)   # returns self (chainable)

@@ -98,7 +98,7 @@ result.error      # => "Invalid credentials"</code></pre>
         <div class="feature-card">
           <span class="feature-icon">🔗</span>
           <h3>Flow</h3>
-          <p>Compose operations in sequence sharing one context. Automatic rollback on failure. Conditional <code>skip_if</code> steps.</p>
+          <p>Compose operations in sequence sharing one context. Three auto-detected modes: sync (returns <code>Ctx</code>), fire-and-forget async (returns <code>Ctx</code>), and durable suspend/resume via <code>subject</code> (returns <code>FlowRun</code>). Automatic rollback on failure.</p>
         </div>
         <div class="feature-card">
           <span class="feature-icon">&#x1F527;</span>
@@ -163,7 +163,7 @@ result.order     # => #&lt;Order id=42&gt;</code></pre>
         </thead>
         <tbody>
           <tr><td><code>Easyop::Operation</code></td><td>Core mixin — include in any class</td></tr>
-          <tr><td><code>Easyop::Flow</code></td><td>Sequential operation chain with rollback</td></tr>
+          <tr><td><code>Easyop::Flow</code></td><td>Sequential operation chain with rollback. Returns <code>Ctx</code> (Mode 1/2) or <code>FlowRun</code> (Mode 3 — when <code>subject</code> is declared). See <a href="flows.html#mode-1-sync">Flows docs</a> for the full three-mode dispatch.</td></tr>
           <tr><td><code>Easyop::FlowBuilder</code></td><td>Builder returned by <code>FlowClass.prepare</code></td></tr>
           <tr><td><code>Easyop::Ctx</code></td><td>Shared context + result object</td></tr>
           <tr><td><code>Easyop::Ctx::Failure</code></td><td>Exception raised by <code>ctx.fail!</code></td></tr>

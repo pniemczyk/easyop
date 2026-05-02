@@ -283,28 +283,25 @@ class Reports::GeneratePDF < ApplicationOperation
   end
 end
 
-# Enqueue immediately:
-Reports::GeneratePDF.call_async(report_id: 123)
+# Fluent form (preferred):
+Reports::GeneratePDF.async.call(report_id: 123)
+Reports::GeneratePDF.async(wait: 5.minutes).call(report_id: 123)
+Reports::GeneratePDF.async(wait_until: Date.tomorrow.noon).call(report_id: 123)
+Reports::GeneratePDF.async(queue: "low_priority").call(report_id: 123)
 
-# With delay:
-Reports::GeneratePDF.call_async(report_id: 123, wait: 5.minutes)
-
-# At a specific time:
-Reports::GeneratePDF.call_async(report_id: 123, wait_until: Date.tomorrow.noon)
-
-# Override queue at call time:
-Reports::GeneratePDF.call_async(report_id: 123, queue: "low_priority")
+# Classic form (still works — no deprecation):
+# Reports::GeneratePDF.call_async(report_id: 123)
 
 # ActiveRecord objects are auto-serialized (class + id) and re-fetched in the job:
 class Orders::SendConfirmation < ApplicationOperation
   plugin Easyop::Plugins::Async, queue: "mailer"
 end
 
-Orders::SendConfirmation.call_async(order: @order, user: current_user)
+Orders::SendConfirmation.async.call(order: @order, user: current_user)
 # => Serialized as: { "order" => { "__ar_class" => "Order", "__ar_id" => 42 },
 #                     "user"  => { "__ar_class" => "User",  "__ar_id" => 7  } }
 
-# The job class is created lazily on first call_async:
+# The job class is created lazily on first enqueue:
 Easyop::Plugins::Async::Job  # => the ActiveJob subclass
 
 # queue DSL — declare the default queue on a class without re-declaring the plugin.
@@ -333,7 +330,7 @@ Weather::FetchForecast._async_default_queue      # => "weather"
 Weather::CleanupExpiredDays._async_default_queue # => "low_priority"
 
 # Per-call override still takes precedence:
-Weather::CleanupExpiredDays.call_async(queue: "critical")
+Weather::CleanupExpiredDays.async(queue: "critical").call(attrs)
 
 # ── Plugin 4: Transactional ───────────────────────────────────────────────────
 
@@ -463,7 +460,7 @@ class IndexOrderAsync < ApplicationOperation
   plugin Easyop::Plugins::Async,         queue: "indexing"
   plugin Easyop::Plugins::EventHandlers
 
-  on "order.*",      async: true             # enqueued via call_async
+  on "order.*",      async: true             # enqueued via ActiveJob (internally uses call_async)
   on "inventory.**", async: true, queue: "low"  # per-subscription queue override
 
   def call
@@ -716,3 +713,39 @@ end
 class Cache::Lookup < ApplicationOperation
   timing false
 end
+
+# ── Note (v0.5): Step-builder DSL and plugin Easyop::Plugins::Async ──────────
+#
+# The fluent step-builder methods (.async, .skip_if, .skip_unless, .on_exception,
+# .tags, .wait) are class methods added by plugin Easyop::Plugins::Async.
+#
+# Rule: any operation class whose step-builder DSL is called inside a `flow`
+# declaration MUST have `plugin Easyop::Plugins::Async` installed on it (or on a
+# parent class it inherits from).
+#
+# An operation used as a BARE step (no modifiers) does NOT need the plugin.
+#
+# Examples:
+#
+#   # ✅ SendWelcomeEmail has the plugin — .async is a valid class method
+#   class SendWelcomeEmail < ApplicationOperation
+#     plugin Easyop::Plugins::Async
+#     def call; ...; end
+#   end
+#
+#   flow CreateUser,
+#        SendWelcomeEmail.async,                            # OK — plugin installed
+#        SendNudge.async(wait: 3.days)                     # OK — plugin installed
+#                 .skip_if { |ctx| !ctx[:newsletter] },
+#        RecordComplete                                     # OK — bare step, no plugin needed
+#
+#   # ❌ CreateUser has NO plugin — calling .async raises NoMethodError
+#   class CreateUser < ApplicationOperation
+#     def call; ...; end
+#   end
+#   CreateUser.async   # => NoMethodError: undefined method `async'
+#
+# The `.async` modifier routes the step to ActiveJob via `klass.call_async` in
+# Mode-2 flows, or to the DB Scheduler in Mode-3 (durable) flows.
+# The `.on_exception` and `.tags` modifiers are only meaningful in durable (Mode-3)
+# flows; using them in a non-durable flow raises PersistentFlowOnlyOptionsError.

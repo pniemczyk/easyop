@@ -70,4 +70,61 @@ class SkipTest < Minitest::Test
     result = flow.call
     assert result[:ran]
   end
+
+  def test_all_steps_run_when_no_skip_if_declared
+    log = []
+    step_a = Class.new { include Easyop::Operation; define_method(:call) { log << :a } }
+    step_b = Class.new { include Easyop::Operation; define_method(:call) { log << :b } }
+    Class.new { include Easyop::Flow; flow step_a, step_b }.call
+    assert_equal [:a, :b], log
+  end
+
+  def test_skipped_step_not_added_to_rollback_list
+    rollback_log = []
+    step_a = Class.new do
+      include Easyop::Operation
+      define_method(:call) {}
+      define_method(:rollback) { rollback_log << :a }
+    end
+    step_b = Class.new do
+      include Easyop::Operation
+      skip_if { |_ctx| true }
+      define_method(:call) { rollback_log << :b_called }
+      define_method(:rollback) { rollback_log << :b_rollback }
+    end
+    step_c = Class.new do
+      include Easyop::Operation
+      define_method(:call) { ctx.fail!(error: 'c failed') }
+    end
+    Class.new { include Easyop::Flow; flow step_a, step_b, step_c }.call
+    assert_equal [:a], rollback_log
+  end
+
+  def test_skip_if_works_with_predicate_pattern
+    log = []
+    apply_coupon = Class.new do
+      include Easyop::Operation
+      skip_if { |ctx| !ctx.coupon_code? || ctx.coupon_code.to_s.empty? }
+      define_method(:call) { log << :coupon_applied }
+    end
+    flow = Class.new { include Easyop::Flow; flow apply_coupon }
+
+    flow.call(coupon_code: 'SAVE10')
+    assert_equal [:coupon_applied], log
+
+    log.clear
+    flow.call
+    assert_empty log
+  end
+
+  def test_skip_if_does_not_affect_direct_call
+    log = []
+    op = Class.new do
+      include Easyop::Operation
+      skip_if { |_ctx| true }
+      define_method(:call) { log << :ran }
+    end
+    op.call
+    assert_equal [:ran], log
+  end
 end

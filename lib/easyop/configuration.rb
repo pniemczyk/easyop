@@ -54,6 +54,42 @@ module Easyop
     #   # easyop_recording_secret: <key>
     attr_accessor :recording_secret
 
+    # ── Scheduler (opt-in via require "easyop/scheduler") ────────────────────
+
+    # AR model class name for the scheduled tasks table.
+    attr_accessor :scheduler_model
+
+    # Maximum tasks claimed and executed per tick.
+    attr_accessor :scheduler_batch_size
+
+    # How long a claimed row is considered "in flight" before the sweeper
+    # resets it as stuck. Integer seconds or an ActiveSupport duration.
+    attr_accessor :scheduler_lock_window
+
+    # How long past locked_until before a running row is considered stuck.
+    attr_accessor :scheduler_stuck_threshold
+
+    # Default max retry attempts per scheduled task.
+    attr_accessor :scheduler_default_max_attempts
+
+    # Default backoff strategy between retry attempts.
+    # :linear     → attempts * 30 seconds
+    # :exponential → (2 ** attempts).minutes (capped at 1 hour)
+    # Proc        → ->(attempts, task) { <seconds> }
+    attr_accessor :scheduler_default_backoff
+
+    # Called when a task exhausts its retries and transitions to state='dead'.
+    # Proc or nil.
+    attr_accessor :scheduler_dead_letter_callback
+
+    # ── PersistentFlow (opt-in via require "easyop/persistent_flow") ─────────
+
+    # AR model class name for the flow runs table.
+    attr_accessor :persistent_flow_model
+
+    # AR model class name for the flow run steps table.
+    attr_accessor :persistent_flow_step_model
+
     def initialize
       @type_adapter           = :native
       @strict_types           = false
@@ -61,6 +97,17 @@ module Easyop
       @recording_filter_keys  = []
       @recording_encrypt_keys = []
       @recording_secret       = nil
+
+      @scheduler_model                = 'EasyScheduledTask'
+      @scheduler_batch_size           = 50
+      @scheduler_lock_window          = 300   # 5 minutes in seconds
+      @scheduler_stuck_threshold      = 600   # 10 minutes in seconds
+      @scheduler_default_max_attempts = 3
+      @scheduler_default_backoff      = :exponential
+      @scheduler_dead_letter_callback = nil
+
+      @persistent_flow_model      = 'EasyFlowRun'
+      @persistent_flow_step_model = 'EasyFlowRunStep'
     end
   end
 

@@ -21,14 +21,14 @@ lib/
     rescuable.rb               # Easyop::Rescuable — rescue_from DSL
     skip.rb                    # Easyop::Skip — skip_if DSL for conditional flow steps
     schema.rb                  # Easyop::Schema — optional typed params/result DSL
-    operation.rb               # Easyop::Operation — the core mixin
+    operation.rb               # Easyop::Operation — core mixin
     flow_builder.rb            # Easyop::FlowBuilder — callback builder returned by prepare
     flow.rb                    # Easyop::Flow — sequential operation chain
     plugins/
       base.rb                  # Easyop::Plugins::Base — abstract base for custom plugins
       instrumentation.rb       # Easyop::Plugins::Instrumentation — ActiveSupport::Notifications
       recording.rb             # Easyop::Plugins::Recording — persists executions to AR model
-      async.rb                 # Easyop::Plugins::Async — .call_async via ActiveJob
+      async.rb                 # Easyop::Plugins::Async — .call_async + ActiveJob serialization
       transactional.rb         # Easyop::Plugins::Transactional — DB transaction wrapper
       events.rb                # Easyop::Plugins::Events — domain event producer (emits DSL)
       event_handlers.rb        # Easyop::Plugins::EventHandlers — domain event subscriber (on DSL)
@@ -41,10 +41,25 @@ lib/
         custom.rb              # Easyop::Events::Bus::Custom — wraps user adapter
         adapter.rb             # Easyop::Events::Bus::Adapter — inheritable base for custom buses
       registry.rb              # Easyop::Events::Registry — global bus + subscriptions
-spec/
-  easyop/                      # RSpec specs, one file per module
+    testing.rb                 # Easyop::Testing — test helpers loader
+    testing/
+      assertions.rb                    # Easyop::Testing::Assertions — basic ctx assertions
+      async_assertions.rb              # Easyop::Testing::AsyncAssertions — capture_async spy
+      event_assertions.rb              # Easyop::Testing::EventAssertions — event capture helpers
+      recording_assertions.rb          # Easyop::Testing::RecordingAssertions — log assertions
+      persistent_flow_assertions.rb    # Easyop::Testing::PersistentFlowAssertions — speedrun_flow, assert_flow_status, …
+    persistent_flow.rb         # Easyop::PersistentFlow — deprecated shim; sets @_persistent_flow_compat
+    persistent_flow/
+      runner.rb                # Easyop::PersistentFlow::Runner — advance!, execute_scheduled_step!, _apply_exception_policy!
+      flow_run_model.rb        # Easyop::PersistentFlow::FlowRunModel — mixin for EasyFlowRun AR model
+      flow_run_step_model.rb   # Easyop::PersistentFlow::FlowRunStepModel — mixin for EasyFlowRunStep AR model
+      perform_step_job.rb      # Easyop::PersistentFlow::PerformStepJob — optional ActiveJob wrapper
+test/
+  easyop/                      # Minitest tests, one file per module
 examples/
-  usage.rb                     # 13 runnable examples
+  usage.rb                     # Runnable examples (basic through advanced)
+  code/
+    09_fluent_async_api.rb     # Standalone fluent API demo
 llms/
   overview.md                  # This file
   usage.md                     # Common patterns and recipes
@@ -87,6 +102,16 @@ end
 
 result = ProcessOrder.call(user: current_user, cart: cart)
 ```
+
+**Three execution modes**: `Flow` auto-detects the mode based on the class declaration:
+
+| Mode | Trigger | Returns |
+|------|---------|---------|
+| 1 — sync | No `subject`, no `.async` step | `Ctx` |
+| 2 — fire-and-forget | No `subject`, has `.async` step | `Ctx` (async steps enqueued via `call_async`) |
+| 3 — durable | `subject` declared | `FlowRun` (DB-backed) |
+
+`subject` is the **only** durability trigger. `.async` steps alone do NOT make a flow durable.
 
 **Recording plugin integration**: `CallBehavior#call` automatically sets `__recording_parent_operation_name` and `__recording_parent_reference_id` in ctx before running steps, so every step log entry links back to the flow. This works with bare `include Easyop::Flow` (flow not recorded, steps carry correct parent) AND when the flow inherits from a recorded base class (flow appears in logs as root, RunWrapper handles ctx):
 
@@ -140,10 +165,10 @@ ProcessOrder.prepare
 When `include Easyop::Operation` is evaluated, the following modules are added
 to the class (in this order):
 
-1. `ClassMethods` — `call`, `call!`
+1. `ClassMethods` — `call`, `call!`, `plugin`
 2. `Easyop::Hooks` — `before`, `after`, `around`, `prepare`
 3. `Easyop::Rescuable` — `rescue_from`
-4. `Easyop::Skip` — `skip_if`
+4. `Easyop::Skip` — `skip_if` (class-level predicate for conditional step skipping in flows)
 5. `Easyop::Schema` — `params`/`inputs`, `result`/`outputs`
 
 ## Flow execution model
@@ -164,29 +189,22 @@ ProcessOrder.call(attrs)
                 └── ctx.rollback!         ← calls .rollback on instances in reverse
 ```
 
-## skip_if — class-level step condition
+## skip_if — step condition (two forms)
 
 ```ruby
+# 1. Class-level predicate on the operation:
 class ApplyCoupon
   include Easyop::Operation
   skip_if { |ctx| !ctx.coupon_code? || ctx.coupon_code.to_s.empty? }
   def call; ctx.discount = CouponService.apply(ctx.coupon_code); end
 end
-```
 
-When Flow encounters `ApplyCoupon`, it calls `ApplyCoupon.skip?(ctx)` before
-instantiating the step. If truthy, the step is skipped entirely and NOT added
-to the rollback list.
-
-Both `skip_if` and inline lambda guards work:
-
-```ruby
-# Lambda guard (inline in flow list):
+# 2. Lambda guard inline in the flow list (gates the next step):
 flow ValidateCart, ->(ctx) { ctx.coupon_code? }, ApplyCoupon
-
-# Class-level skip_if:
-flow ValidateCart, ApplyCoupon   # ApplyCoupon declares its own skip_if
 ```
+
+When Flow encounters a step, it calls `step.skip?(ctx)` before instantiating.
+If truthy, the step is skipped entirely and NOT added to the rollback list.
 
 ## Schema DSL (optional)
 
@@ -273,9 +291,15 @@ Class-level `record_result` overrides the plugin default. Missing ctx keys → `
 
 ### Async
 
-Adds `.call_async(attrs, wait:, wait_until:, queue:)`.
-Serializes AR objects as `{ "__ar_class", "__ar_id" }` and re-fetches in the job.
-Default queue set via `plugin Easyop::Plugins::Async, queue: "myqueue"` or via the `queue` class method DSL:
+Enables async execution via `ActiveJob`. Serializes AR objects as `{ "__ar_class", "__ar_id" }` and re-fetches in the job.
+
+```ruby
+MyOp.call_async(user: @user, amount: 100)
+MyOp.call_async(user: @user, wait: 5.minutes)
+MyOp.call_async(attrs, queue: "low_priority")
+```
+
+Default queue set via `plugin Easyop::Plugins::Async, queue: "myqueue"` or the `queue` class DSL:
 
 ```ruby
 class Weather::BaseOperation < ApplicationOperation
@@ -287,7 +311,7 @@ class Weather::CleanupExpiredDays < Weather::BaseOperation
 end
 ```
 
-`queue` accepts `Symbol` or `String`. Per-call `queue:` argument to `.call_async` always wins.
+`queue` accepts `Symbol` or `String`. Per-call `queue:` argument always wins.
 
 ### Transactional
 
@@ -407,6 +431,74 @@ module MyPlugin < Easyop::Plugins::Base
   end
 end
 ```
+
+## Durability (Mode 3)
+
+### Setup
+
+```ruby
+# In initializer — order matters
+require 'easyop/scheduler'
+require 'easyop/persistent_flow'
+
+# Generate AR models and migrations:
+# bin/rails generate easyop:install
+```
+
+### Declaration
+
+```ruby
+class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # ← the ONLY durability trigger
+
+  # Operations using step-builder DSL (.async, .skip_if, .on_exception) MUST
+  # have plugin Easyop::Plugins::Async installed
+  flow CreateAccount,
+       SendWelcomeEmail.async,
+       SendNudge.async(wait: 3.days).skip_if { |ctx| ctx[:skip_nudge] },
+       RecordComplete
+end
+
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+# => EasyFlowRun; status: 'running'
+```
+
+### Runner dispatch
+
+- `Runner.advance!(flow_run)` — sync steps run inline; async steps schedule
+  `PerformStepOperation` via `Easyop::Scheduler.schedule_at` then return.
+- `Runner.execute_scheduled_step!(flow_run)` — runs the current async step, then
+  calls `advance!` to continue.
+
+### Free composition
+
+Durable sub-flows are flattened into the outer's `_resolved_flow_steps`, auto-promoting
+the outer to Mode 3. The effective `subject` is inherited from the first durable
+sub-flow (`_resolved_subject` searches depth-first).
+
+### Error classes
+
+| Class | When raised |
+|-------|-------------|
+| `Easyop::Flow::DurableSupportNotLoadedError` | `subject` declared without `require "easyop/persistent_flow"` |
+| `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | Whole flow wrapped in `.async` |
+| `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | Step-builder modifier wraps a durable sub-flow |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `.on_exception` / `.tags` in a non-durable flow |
+
+### Testing
+
+```ruby
+include Easyop::Testing   # auto-includes PersistentFlowAssertions
+
+run = OnboardSubscriber.call(user: user, plan: :pro)
+speedrun_flow(run)   # advances async steps without real delays
+assert_flow_status    run, :succeeded
+assert_step_completed run, SendWelcomeEmail
+```
+
+---
 
 ## Critical design decisions
 

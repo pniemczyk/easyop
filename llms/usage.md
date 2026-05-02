@@ -215,7 +215,20 @@ end
 RiskyOp.call.error  # => "An unexpected error occurred"
 ```
 
-## 11. Flow — sequential composition
+## 11. Flow — sequential composition (three modes)
+
+`Easyop::Flow` auto-selects one of three execution modes:
+
+| Mode | Trigger | Returns |
+|------|---------|---------|
+| 1 — sync | No `subject`, no `.async` step | `Ctx` (inline execution) |
+| 2 — fire-and-forget async | No `subject`, has `.async` step | `Ctx`; async steps enqueued via `klass.call_async` |
+| 3 — durable | **`subject` declared** | `FlowRun` (DB-backed suspend/resume) |
+
+`subject` is the **only** durability trigger. An `.async` step alone (without `subject`)
+is Mode 2 — fire-and-forget, NOT durable.
+
+### Mode 1 — pure sync
 
 ```ruby
 class ProcessCheckout
@@ -235,6 +248,122 @@ result.order      # => #<Order ...>
 
 Each step shares the same `ctx`. Failure in any step halts the chain.
 
+### Mode 2 — fire-and-forget async
+
+Operations using step-builder DSL (`.async`, `.skip_if`, etc.) MUST have
+`plugin Easyop::Plugins::Async` installed. Bare steps (no modifiers) do not.
+
+```ruby
+class RegisterAndNotify
+  include Easyop::Flow
+
+  # SendWelcomeEmail must have plugin Easyop::Plugins::Async
+  flow CreateUser,
+       SendWelcomeEmail.async,   # enqueued via call_async; flow continues immediately
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| !ctx[:newsletter] },
+       AssignTrial              # sync — runs after enqueue, not after delivery
+end
+
+ctx = RegisterAndNotify.call(email: 'alice@example.com')
+ctx.success?   # => true (SendWelcomeEmail not yet run — it's in the job queue)
+```
+
+### Mode 3 — durable (suspend-and-resume)
+
+Requires `require "easyop/scheduler"` and `require "easyop/persistent_flow"` in
+your initializer. Also requires generated AR models (`rails g easyop:install`).
+
+```ruby
+# config/initializers/easyop.rb
+require 'easyop/scheduler'
+require 'easyop/persistent_flow'
+
+class OnboardSubscriber
+  include Easyop::Flow
+
+  subject :user   # ← the ONLY durability trigger; binds a polymorphic AR reference
+
+  # Operations with step-builder DSL MUST have plugin Easyop::Plugins::Async
+  flow CreateAccount,
+       SendWelcomeEmail.async,
+       SendNudge.async(wait: 3.days)
+                .skip_if { |ctx| ctx[:skip_nudge] },
+       RecordComplete
+end
+
+flow_run = OnboardSubscriber.call(user: user, plan: :pro)
+# => EasyFlowRun AR record
+
+flow_run.id       # => Integer
+flow_run.status   # => 'running' (waiting for async step)
+flow_run.subject  # => the User AR record
+```
+
+#### FlowRun lifecycle
+
+```ruby
+flow_run.cancel!     # sets status: 'cancelled'; cancels scheduled tasks
+flow_run.pause!      # sets status: 'paused'
+flow_run.resume!     # re-advances from the last completed step
+flow_run.succeeded?  # => true when all steps finished
+flow_run.failed?     # => true after unhandled failure
+```
+
+#### Exception policies (durable flows only)
+
+```ruby
+# These require plugin Easyop::Plugins::Async on the operation class
+flow CreateAccount,
+     ChargeCard.on_exception(:cancel!),
+     SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3)
+```
+
+| Policy | Behavior |
+|--------|----------|
+| `:cancel!` (default) | Marks flow as `'failed'` immediately |
+| `:reattempt!` | Reschedules via Scheduler; fails after `max_reattempts` total attempts |
+
+Note: `ctx.fail!` (graceful failure) always marks the flow as failed regardless
+of exception policy. `raise` inside a step body propagates as an unhandled exception
+and is subject to the policy.
+
+### Free composition
+
+```ruby
+class InnerDurable
+  include Easyop::Flow
+  subject :user
+  flow StepA, StepB.async(wait: 1.day)
+end
+
+class OuterPlain
+  include Easyop::Flow
+  flow Op1, InnerDurable, Op2   # no own subject
+end
+
+run = OuterPlain.call(user: user)   # => FlowRun (auto-promoted to Mode 3)
+# InnerDurable's steps are flattened: [Op1, StepA, StepB.async(wait: 1.day), Op2]
+```
+
+When a durable sub-flow is embedded, the outer auto-promotes to Mode 3. The
+`subject` key is inherited from the first durable sub-flow (`_resolved_subject`
+searches depth-first). Mode-2 sub-flows stay encapsulated as a single inline step.
+
+### New error classes (v0.5)
+
+| Error | Fix |
+|-------|-----|
+| `Easyop::Flow::DurableSupportNotLoadedError` | Add `require "easyop/persistent_flow"` to initializer |
+| `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | Replace `Inner.async(wait:)` with `Easyop::Scheduler.schedule_at(Inner, ...)` |
+| `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | Wrap the durable sub-flow in a plain operation |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | Add `subject` to make the flow durable, or remove `.on_exception`/`.tags` |
+
+### Deprecations (v0.5 → v0.6)
+
+- `include Easyop::PersistentFlow` → use `include Easyop::Flow` + `subject :foo`
+- `.start!(attrs)` → use `.call(attrs)`
+
 ## 12. skip_if — optional steps
 
 ```ruby
@@ -251,11 +380,20 @@ end
 
 Skipped steps are never added to the rollback list.
 
-Alternative: inline lambda guard in the flow list:
+Three forms — all equivalent, mix freely in the same flow:
 
 ```ruby
+# 1. Class-level predicate (declared on the operation itself):
+flow ValidateCart, ApplyCoupon    # ApplyCoupon declares its own skip_if
+
+# 2. Inline lambda guard (in the flow list, gates the next step):
 flow ValidateCart,
      ->(ctx) { ctx.coupon_code? }, ApplyCoupon,
+     ChargePayment
+
+# 3. Fluent builder — requires Plugins::Async on ApplyCoupon:
+flow ValidateCart,
+     ApplyCoupon.skip_if { |ctx| !ctx.coupon_code? },
      ChargePayment
 ```
 
@@ -347,7 +485,98 @@ end
 
 Ctx is shared across all nesting levels.
 
-## 17. Testing operations with RSpec
+## 17. Testing durable flows
+
+`include Easyop::Testing` auto-includes `PersistentFlowAssertions` when
+`Easyop::PersistentFlow` is loaded.
+
+### Minitest pattern
+
+```ruby
+class OnboardSubscriberTest < Minitest::Test
+  include Easyop::Testing
+
+  def setup
+    @user = User.create!(email: 'alice@example.com')
+  end
+
+  def test_onboarding_succeeds
+    run = OnboardSubscriber.call(user: @user, plan: :pro)
+
+    # speedrun_flow advances all async steps synchronously — no real delays
+    speedrun_flow(run)
+
+    assert_flow_status    run, :succeeded
+    assert_step_completed run, SendWelcomeEmail
+    assert_step_completed run, SendNudge
+  end
+
+  def test_nudge_skipped_when_flag_set
+    run = OnboardSubscriber.call(user: @user, plan: :pro, skip_nudge: true)
+    speedrun_flow(run)
+
+    assert_flow_status  run, :succeeded
+    assert_step_skipped run, SendNudge
+  end
+
+  def test_flow_fails_when_account_creation_fails
+    # stub CreateAccount to fail
+    stub_op(CreateAccount, success: false, error: 'Already exists') do
+      run = OnboardSubscriber.call(user: @user, plan: :pro)
+      speedrun_flow(run)
+      assert_flow_status  run, :failed
+      assert_step_failed  run, CreateAccount
+    end
+  end
+end
+```
+
+### RSpec pattern
+
+```ruby
+RSpec.describe OnboardSubscriber do
+  include Easyop::Testing
+
+  let(:user) { create(:user) }
+
+  it 'onboards the user successfully' do
+    run = described_class.call(user: user, plan: :pro)
+    speedrun_flow(run)
+    expect(run).to be_succeeded
+    assert_step_completed run, SendWelcomeEmail
+  end
+end
+```
+
+### PersistentFlowAssertions helpers
+
+| Helper | Description |
+|--------|-------------|
+| `speedrun_flow(flow_run)` | Advance all async steps synchronously without real delays |
+| `assert_flow_status(run, status)` | Assert `flow_run.status` — accepts Symbol or String |
+| `assert_step_completed(run, OpClass)` | Assert a step record with `status: 'completed'` exists |
+| `assert_step_skipped(run, OpClass)` | Assert a step record with `status: 'skipped'` exists |
+| `assert_step_failed(run, OpClass)` | Assert a step record with `status: 'failed'` exists |
+
+### Key accuracy reminders
+
+```ruby
+# ctx.fail! → graceful failure — always marks the flow as 'failed' immediately,
+# regardless of on_exception policy
+ctx.fail!(error: 'Card declined')   # => flow status: 'failed', no retry
+
+# raise inside a step → unhandled exception — subject to on_exception policy
+raise Stripe::CardError, 'declined'   # => :reattempt! or :cancel! applies
+
+# ctx[:key] — hash-style; returns nil for missing keys
+ctx[:missing_key]   # => nil (never raises)
+
+# ctx.key — method-style; raises NoMethodError for missing keys
+ctx.missing_key     # => NoMethodError if the key was never set
+ctx.missing_key?    # => false (predicate form is safe for missing keys)
+```
+
+## 18. Testing operations with RSpec
 
 ```ruby
 RSpec.describe CreateAccount do
@@ -516,7 +745,7 @@ ProcessCheckout  root=aaa  ref=bbb  parent=nil
 
 Bare `include Easyop::Flow` (without inheriting from a recorded base) still works — steps carry the correct `parent_operation_name` — but the flow itself won't have a row in `operation_logs`.
 
-## 21. Async plugin
+## 21. Async plugin — operation-level enqueue
 
 ```ruby
 require "easyop/plugins/async"
@@ -525,13 +754,18 @@ class Reports::GenerateMonthlyPDF < ApplicationOperation
   plugin Easyop::Plugins::Async, queue: "reports"
 end
 
-# Enqueue:
-Reports::GenerateMonthlyPDF.call_async(user_id: current_user.id, month: params[:month])
+# Fluent form (preferred):
+Reports::GenerateMonthlyPDF.async.call(user_id: current_user.id, month: params[:month])
+Reports::GenerateMonthlyPDF.async(wait: 5.minutes).call(user_id: 1, month: "2024-01")
+Reports::GenerateMonthlyPDF.async(wait_until: Date.tomorrow.noon).call(user_id: 1, month: "2024-01")
+Reports::GenerateMonthlyPDF.async(queue: :low).call(user_id: 1, month: "2024-01")
 
-# With scheduling:
+# Classic form (still works — no deprecation):
+Reports::GenerateMonthlyPDF.call_async(user_id: current_user.id, month: params[:month])
 Reports::GenerateMonthlyPDF.call_async(user_id: 1, month: "2024-01", wait: 5.minutes)
-Reports::GenerateMonthlyPDF.call_async(user_id: 1, month: "2024-01", wait_until: Date.tomorrow.noon)
 ```
+
+Both forms are exactly equivalent: `Op.async(**opts).call(attrs)` ≡ `Op.call_async(attrs, **opts)`.
 
 **`queue` DSL** — override the default queue on a class without re-declaring the plugin:
 
@@ -545,7 +779,8 @@ class Weather::CleanupExpiredDays < Weather::BaseOperation
 end
 
 # Per-call override still works (highest priority):
-Weather::CleanupExpiredDays.call_async(attrs, queue: "critical")
+Weather::CleanupExpiredDays.async(queue: "critical").call(attrs)
+# or: Weather::CleanupExpiredDays.call_async(attrs, queue: "critical")
 ```
 
 The `queue` setting is inherited by subclasses. Accepts `Symbol` or `String`.

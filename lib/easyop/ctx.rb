@@ -47,6 +47,10 @@ module Easyop
 
     # ── Attribute access ─────────────────────────────────────────────────────
 
+    # Allows cancel_if / skip_if blocks written as { ctx[:key] } when evaluated
+    # via instance_exec (self is the Ctx, so `ctx` resolves to this method).
+    def ctx = self
+
     def [](key)
       @attributes[key.to_sym]
     end

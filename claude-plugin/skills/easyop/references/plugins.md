@@ -29,7 +29,7 @@ Plugins wrap `_easyop_run` via `prepend`. The last installed plugin is the outer
 
 ```
 Transactional (outermost — last installed)
-  Async::Job wrapping (not in the stack; Async only adds .call_async)
+  Async::Job wrapping (not in the stack; Async only adds .async / .call_async)
     Recording::RunWrapper
       Instrumentation::RunWrapper
         prepare { before → call → after }  (innermost)
@@ -226,12 +226,22 @@ Recording errors are silently swallowed — a failed log write never breaks the 
 plugin Easyop::Plugins::Async, queue: "default"
 ```
 
-**Enqueueing:**
+### Operation-level async — enqueue a background job
+
+**Fluent form (preferred):**
 ```ruby
-MyOp.call_async(attrs)                                  # default queue
-MyOp.call_async(attrs, queue: "low")                    # override queue per call
-MyOp.call_async(attrs, wait: 10.minutes)                # delay
-MyOp.call_async(attrs, wait_until: Date.tomorrow.noon)  # scheduled
+MyOp.async.call(attrs)                                     # enqueue immediately
+MyOp.async(wait: 10.minutes).call(attrs)                   # with delay
+MyOp.async(wait_until: Date.tomorrow.noon).call(attrs)     # scheduled time
+MyOp.async(queue: "low", wait: 5.minutes).call(attrs)      # queue override + delay
+```
+
+**Classic form (still works — no deprecation pressure):**
+```ruby
+MyOp.call_async(attrs)
+MyOp.call_async(attrs, wait: 10.minutes)
+MyOp.call_async(attrs, wait_until: Date.tomorrow.noon)
+MyOp.call_async(attrs, queue: "low")
 ```
 
 **`queue` DSL** — declare or override the default queue directly on a class without re-declaring the plugin. Accepts `Symbol` or `String`. Inherited by subclasses; can be overridden at any level:
@@ -250,7 +260,7 @@ Priority (highest → lowest): per-call `queue:` argument → `queue` DSL → `p
 
 **Serialization:** ActiveRecord objects are serialized as `{ "__ar_class" => "User", "__ar_id" => 42 }` and re-fetched in the job. Only pass: `String`, `Integer`, `Float`, `Boolean`, `nil`, `Hash`, `Array`, or `ActiveRecord::Base`.
 
-**Job class:** `Easyop::Plugins::Async::Job` — created lazily on first `.call_async`.
+**Job class:** `Easyop::Plugins::Async::Job` — created lazily on first enqueue (`.call_async`).
 
 **Requires:** `ActiveJob::Base` (raises `LoadError` if not available).
 

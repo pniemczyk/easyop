@@ -153,4 +153,5 @@ class FlowTest < Minitest::Test
     f = make_flow
     assert_instance_of Easyop::FlowBuilder, f.prepare
   end
+
 end

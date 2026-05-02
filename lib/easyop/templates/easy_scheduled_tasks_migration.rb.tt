@@ -1,0 +1,56 @@
+class CreateEasyScheduledTasks < ActiveRecord::Migration[8.1]
+  def change
+    create_table :easy_scheduled_tasks do |t|
+      # Identity
+      t.string   :operation_class,    null: false
+      t.text     :ctx_data,           null: false   # JSON-serialized attrs
+
+      # Timing
+      t.datetime :run_at,             null: false
+      t.string   :cron,               null: true    # recurring cron expression
+      t.integer  :parent_id,          null: true    # recurring: child rows link to root
+
+      # State machine: scheduled → running → completed | failed | dead | canceled
+      t.string   :state,              null: false, default: 'scheduled'
+
+      # Concurrency / crash recovery
+      t.string   :claimed_by,         null: true
+      t.datetime :claimed_at,         null: true
+      t.datetime :locked_until,       null: true
+      t.integer  :lock_version,       null: false, default: 0
+
+      # Retry
+      t.integer  :attempts,           null: false, default: 0
+      t.integer  :max_attempts,       null: false, default: 3
+
+      # Failure info
+      t.string   :last_error_class,   null: true
+      t.text     :last_error_message, null: true
+
+      # Grouping / cancellation — JSON array: ["user:42", "onboarding", "flow:7"]
+      t.text     :tags,               null: true
+
+      # Deduplication key — unique; nil means no dedup
+      t.string   :dedup_key,          null: true
+
+      # Observability linkage
+      t.string   :recording_root_reference_id, null: true
+
+      t.timestamps
+    end
+
+    # Covering index for the hot-path tick query
+    add_index :easy_scheduled_tasks, [:state, :run_at],
+              name: 'idx_est_due'
+
+    # Dedup key uniqueness (partial — only for non-null dedup_key)
+    add_index :easy_scheduled_tasks, :dedup_key,
+              unique: true, where: 'dedup_key IS NOT NULL',
+              name: 'idx_est_dedup_key'
+
+    # Tag-based cancel/query (Postgres only — GIN index)
+    if connection.adapter_name.downcase.include?('postgresql')
+      execute "CREATE INDEX idx_est_tags_gin ON easy_scheduled_tasks USING gin (tags::jsonb)"
+    end
+  end
+end

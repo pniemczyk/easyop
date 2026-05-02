@@ -24,6 +24,5 @@ Gem::Specification.new do |spec|
   spec.metadata['documentation_uri'] = 'https://pniemczyk.github.io/easyop/'
   spec.metadata['changelog_uri']     = "#{spec.homepage}/blob/main/CHANGELOG.md"
 
-  spec.add_development_dependency "rspec",       "~> 3.13"
   spec.add_development_dependency "simplecov",   "~> 0.22"
 end

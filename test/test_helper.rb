@@ -13,6 +13,14 @@ require 'easyop'
 
 # ── Shared test stubs ──────────────────────────────────────────────────────────
 
+# Ensure ActiveSupport::IsolatedExecutionState is available before defining our
+# stub. SimpleCrypt's `crypt` method lazily does `require "active_support/message_encryptor"`,
+# which reopens ActiveSupport::Notifications and overwrites our stub's `instrument`
+# with the real implementation. Having IsolatedExecutionState already loaded means
+# the real implementation works fine when that happens, so tests that run after
+# SimpleCryptTest still pass.
+require 'active_support/isolated_execution_state'
+
 # Stub ActiveSupport::Notifications with yield-before-notify semantics so the
 # Instrumentation plugin can populate payload inside the block before subscribers see it.
 unless defined?(::ActiveSupport::Notifications)
@@ -24,7 +32,8 @@ unless defined?(::ActiveSupport::Notifications)
       class << self
         def instrument(name, payload = {})
           # Yield block FIRST so callers can populate payload before subscribers fire.
-          yield payload if block_given?
+          # Return the block's return value to match real AS::Notifications semantics.
+          result = yield payload if block_given?
           @events << { name: name, payload: payload }
           @subs.each do |pattern, blocks|
             matches = case pattern
@@ -33,7 +42,7 @@ unless defined?(::ActiveSupport::Notifications)
                       end
             blocks.each { |blk| blk.call(name, nil, nil, nil, payload) } if matches
           end
-          payload
+          result
         end
 
         def subscribe(pattern, &block)
@@ -95,11 +104,49 @@ unless defined?(::ActiveRecord::Base)
   end
 end
 
-# Stub String#constantize if absent (normally added by ActiveSupport).
+# Stub String#constantize / #safe_constantize if absent (added by ActiveSupport).
 unless String.method_defined?(:constantize)
   class String
     def constantize
       Object.const_get(self)
+    end
+
+    def safe_constantize
+      constantize
+    rescue NameError
+      nil
+    end
+  end
+end
+
+# Stub ActiveJob::Base for async and scheduler tests.
+unless defined?(::ActiveJob::Base)
+  module ActiveJob
+    class Base
+      @@jobs = []
+
+      def self.queue_as(_q); end
+
+      def self.set(**opts)
+        _make_proxy(opts)
+      end
+
+      def self._make_proxy(accumulated_opts)
+        Class.new do
+          define_singleton_method(:set) { |**more| ActiveJob::Base._make_proxy(accumulated_opts.merge(more)) }
+          define_singleton_method(:perform_later) { |*args| ActiveJob::Base.jobs << { args: args, opts: accumulated_opts } }
+        end
+      end
+
+      def self.jobs
+        @@jobs
+      end
+
+      def self.clear_jobs!
+        @@jobs = []
+      end
+
+      def self.enqueue_after_transaction_commit=(_); end
     end
   end
 end

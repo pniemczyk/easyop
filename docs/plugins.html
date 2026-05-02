@@ -114,7 +114,7 @@ end</code></pre>
 # - The DB transaction opens first and closes last (wraps everything)
 # - Recording measures wall time including transaction overhead
 # - The Instrumentation event fires inside the transaction + recording window
-# - Async only adds .call_async — it does NOT wrap _easyop_run</code></pre>
+# - Async only adds .async / .call_async — it does NOT wrap _easyop_run</code></pre>
 
       <div class="callout callout-tip">
         <strong>Tip</strong>
@@ -434,7 +434,7 @@ end</code></pre>
       <p>Recording failures are silently swallowed — a failed database write never breaks the operation.</p>
 
       <h2 id="async">Plugin: Async</h2>
-      <p>Adds <code>.call_async</code> to any operation class, enqueuing execution as an ActiveJob. Requires ActiveJob (included with Rails).</p>
+      <p>Adds a fluent <code>.async</code> builder API to any operation class, enqueuing execution as an ActiveJob. Requires ActiveJob (included with Rails).</p>
 
       <pre><code class="language-ruby">require "easyop/plugins/async"
 
@@ -442,18 +442,18 @@ class Reports::GeneratePDF &lt; ApplicationOperation
   plugin Easyop::Plugins::Async, queue: "reports"
 end</code></pre>
 
-      <h3>Enqueueing</h3>
+      <h3>Operation-level async (enqueue from anywhere)</h3>
       <pre><code class="language-ruby"># Enqueue immediately (default queue):
-Reports::GeneratePDF.call_async(report_id: 123)
+Reports::GeneratePDF.async.call(report_id: 123)
 
 # Override queue at call time:
-Reports::GeneratePDF.call_async(report_id: 123, queue: "low_priority")
+Reports::GeneratePDF.async(queue: "low_priority").call(report_id: 123)
 
 # Delay execution:
-Reports::GeneratePDF.call_async(report_id: 123, wait: 10.minutes)
+Reports::GeneratePDF.async(wait: 10.minutes).call(report_id: 123)
 
 # Schedule at a specific time:
-Reports::GeneratePDF.call_async(report_id: 123, wait_until: Date.tomorrow.noon)</code></pre>
+Reports::GeneratePDF.async(wait_until: Date.tomorrow.noon).call(report_id: 123)</code></pre>
 
       <h3>Scheduling options</h3>
       <table>
@@ -503,15 +503,38 @@ ChildOp._async_default_queue  # => "operations"  (inherited from parent)</code><
       <h3>ActiveRecord serialization</h3>
       <pre><code class="language-ruby"># AR objects are serialized as { "__ar_class" => "Order", "__ar_id" => 42 }
 # and re-fetched via Order.find(42) in the job:
-Orders::SendConfirmation.call_async(order: @order, user: current_user)
+Orders::SendConfirmation.async.call(order: @order, user: current_user)
 
 # Only pass serializable values:
 # String, Integer, Float, Boolean, nil, Hash, Array, ActiveRecord::Base</code></pre>
 
       <h3>Job class</h3>
-      <pre><code class="language-ruby"># Easyop::Plugins::Async::Job is created lazily on first .call_async call
+      <pre><code class="language-ruby"># Easyop::Plugins::Async::Job is created lazily on first .async.call or .call_async
 # This means you can require the plugin before ActiveJob loads
-Easyop::Plugins::Async::Job  # => the ActiveJob subclass (after first call_async)</code></pre>
+Easyop::Plugins::Async::Job  # => the ActiveJob subclass (after first async enqueue)</code></pre>
+
+      <h3 id="async-in-flows">Async steps inside flows (v0.5)</h3>
+      <p>In v0.5, <code>.async</code> can decorate individual steps inside a <code>flow</code> declaration. The operation class <strong>must</strong> have <code>plugin Easyop::Plugins::Async</code> installed — this is what adds the <code>.async</code>, <code>.skip_if</code>, <code>.on_exception</code>, and <code>.tags</code> class methods. The behavior depends on the flow's execution mode:</p>
+      <ul>
+        <li><strong>Mode 2 (no <code>subject</code>)</strong> — steps with <code>.async</code> fire-and-forget: they are enqueued via <code>call_async</code> (ActiveJob) and the flow continues immediately without waiting.</li>
+        <li><strong>Mode 3 (<code>subject</code> declared)</strong> — steps with <code>.async</code> suspend the flow until the scheduled time; ctx is persisted to the database between steps and re-hydrated on resume.</li>
+      </ul>
+      <pre><code class="language-ruby"># Mode 2 — fire-and-forget (no subject)
+class WelcomeFlow
+  include Easyop::Flow
+  flow CreateUser,
+       SendWelcomeEmail.async,        # enqueued; flow returns immediately
+       AssignDefaultRole
+end
+
+# Mode 3 — durable suspend/resume (subject declared)
+class OnboardSubscriber
+  include Easyop::Flow
+  subject :user
+  flow CreateAccount,
+       SendWelcomeEmail.async,         # flow suspends; resumes when job runs
+       SendNudge.async(wait: 3.days)   # flow suspends again for 3 days
+end</code></pre>
 
       <h2 id="transactional">Plugin: Transactional</h2>
       <p>Wraps every operation call in a database transaction. Supports ActiveRecord and Sequel — adapter is detected automatically.</p>

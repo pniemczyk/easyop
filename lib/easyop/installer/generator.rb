@@ -55,6 +55,38 @@ module Easyop
                         flow_vars(class_name, config))
       end
 
+      def write_scheduler_migration(config)
+        ts   = Time.now.strftime("%Y%m%d%H%M%S")
+        dest = root / "db" / "migrate" / "#{ts}_create_easy_scheduled_tasks.rb"
+        write_template("easy_scheduled_tasks_migration.rb.tt", dest, config)
+      end
+
+      def write_scheduler_model(config)
+        write_template("easy_scheduled_task_model.rb.tt",
+                        root / "app" / "models" / "easy_scheduled_task.rb",
+                        config)
+      end
+
+      def write_persistent_flow_migrations(config)
+        ts1  = Time.now.strftime("%Y%m%d%H%M%S")
+        ts2  = (Time.now + 1).strftime("%Y%m%d%H%M%S")
+        write_template("easy_flow_runs_migration.rb.tt",
+                        root / "db" / "migrate" / "#{ts1}_create_easy_flow_runs.rb",
+                        config)
+        write_template("easy_flow_run_steps_migration.rb.tt",
+                        root / "db" / "migrate" / "#{ts2}_create_easy_flow_run_steps.rb",
+                        config)
+      end
+
+      def write_persistent_flow_models(config)
+        write_template("flow_run_model.rb.tt",
+                        root / "app" / "models" / "easy_flow_run.rb",
+                        config)
+        write_template("flow_run_step_model.rb.tt",
+                        root / "app" / "models" / "easy_flow_run_step.rb",
+                        config)
+      end
+
       # ─── helpers ───────────────────────────────────────────────────────────
 
       def class_name_to_path(class_name, base_dir)

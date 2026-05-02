@@ -11,11 +11,10 @@ Perform a full version bump for the easyop gem. Follow all steps in order — do
 
 ### 2. Run the full test suite
 
-Run both test runners and confirm zero failures before continuing:
+Run the full test suite and confirm zero failures before continuing:
 
 ```bash
-bundle exec rspec
-bundle exec ruby -Ilib:test test/easyop/plugins/recording_test.rb
+bundle exec rake test
 ```
 
 Fix any failures before moving to the next step.

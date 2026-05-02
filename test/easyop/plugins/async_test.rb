@@ -11,10 +11,14 @@ unless defined?(ActiveJob::Base)
       def self.queue_as(_q); end
 
       def self.set(**opts)
-        proxy = Class.new do
-          define_singleton_method(:perform_later) { |*args| @@jobs << { args: args, opts: opts } }
+        _make_proxy(opts)
+      end
+
+      def self._make_proxy(accumulated_opts)
+        Class.new do
+          define_singleton_method(:set) { |**more| ActiveJob::Base._make_proxy(accumulated_opts.merge(more)) }
+          define_singleton_method(:perform_later) { |*args| ActiveJob::Base.jobs << { args: args, opts: accumulated_opts } }
         end
-        proxy
       end
 
       def self.jobs
@@ -182,4 +186,5 @@ class PluginsAsyncTest < Minitest::Test
     # Because op.call is synchronous here, just verify no exception
     # (ctx is not returned from perform, but call ran)
   end
+
 end
