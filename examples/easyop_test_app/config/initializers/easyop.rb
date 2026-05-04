@@ -1,3 +1,4 @@
+require "easyop/plugins/async"
 require "easyop/plugins/instrumentation"
 require "easyop/simple_crypt"
 require "easyop/testing" if Rails.env.test?
