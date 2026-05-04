@@ -1121,6 +1121,274 @@ begin ctx_i.fail! rescue Easyop::Ctx::Failure; end
 assert ctx_i.inspect.include?("FAILED"),   "Ctx#inspect shows 'FAILED' when failed"
 
 # ===========================================================================
+# 38. Async Flows — Mode 2 (fire-and-forget) and Mode 3 (durable with waits)
+# ===========================================================================
+#
+# These sections test the v0.5 unified Easyop::Flow API.
+#
+# Mode 2: flow with .async step but NO `subject` — returns Ctx, step fires async
+# Mode 3: flow with `subject :user` — returns EasyFlowRun, steps persist + resume
+#
+# Because test_easyop.rb is a standalone script (no Rails boot), Mode 3 uses
+# in-memory FakeFlowRun/FakeScheduledTask stubs identical to 08_durable_workflow.rb.
+# In the actual Rails app the real EasyFlowRun / EasyScheduledTask AR models are
+# used (see app/models/ and the migrations).
+
+puts "\n--- Async / Mode 2 / Mode 3 ---"
+
+require "easyop/plugins/async"
+require "easyop/persistent_flow"
+require "easyop/scheduler"
+
+# Time.current shim for standalone use
+unless Time.respond_to?(:current)
+  class Time
+    def self.current; now; end
+  end
+end
+
+# String#constantize shim
+unless ''.respond_to?(:constantize)
+  class String
+    def constantize; Object.const_get(self); end
+  end
+end
+
+# ── Minimal AR stubs (in-memory, no database) ────────────────────────────────
+
+class AsyncTestScope
+  include Enumerable
+  def initialize(records) = @records = records
+  def each(&b)            = @records.each(&b)
+  def count               = @records.size
+  def first               = @records.first
+  def exists?             = @records.any?
+  def where(**c)          = AsyncTestScope.new(@records.select { |r| c.all? { |k,v| r.public_send(k) == v } })
+  def update_all(**attrs) = @records.each { |r| attrs.each { |k,v| r.public_send(:"#{k}=", v) } } && @records.size
+end
+
+class AsyncTestFlowRun
+  include Easyop::PersistentFlow::FlowRunModel
+
+  attr_accessor :id, :flow_class, :context_data, :status, :current_step_index,
+                :subject_type, :subject_id, :started_at, :finished_at
+
+  @@store = []; @@seq = 0
+  def self.store;   @@store; end
+  def self.reset!;  @@store = []; @@seq = 0; end
+  def self.create!(attrs)
+    obj = new; attrs.each { |k,v| obj.public_send(:"#{k}=", v) }
+    @@seq += 1; obj.id = @@seq; @@store << obj; obj
+  end
+  def self.find(id) = @@store.find { |r| r.id == id.to_i } || raise("AsyncTestFlowRun #{id} not found")
+  def self.where(*a, **c)
+    return AsyncTestScope.new(@@store) if a.any? && c.empty?
+    AsyncTestScope.new(@@store.select { |r| c.all? { |k,v| r.public_send(k) == v } })
+  end
+  def initialize; @status = 'pending'; @current_step_index = 0; @context_data = '{}'; end
+  def update!(a)        = a.each { |k,v| public_send(:"#{k}=", v) } && self
+  def update_columns(a) = update!(a)
+  def reload            = self
+end
+
+class AsyncTestFlowRunStep
+  include Easyop::PersistentFlow::FlowRunStepModel
+
+  attr_accessor :id, :flow_run_id, :step_index, :operation_class, :status,
+                :attempt, :error_class, :error_message, :started_at, :finished_at
+
+  @@store = []; @@seq = 0
+  def self.store;   @@store; end
+  def self.reset!;  @@store = []; @@seq = 0; end
+  def self.create!(attrs)
+    obj = new; attrs.each { |k,v| obj.public_send(:"#{k}=", v) }
+    @@seq += 1; obj.id = @@seq; @@store << obj; obj
+  end
+  def self.find(id) = @@store.find { |r| r.id == id.to_i }
+  def self.where(*a, **c)
+    return AsyncTestScope.new(@@store) if a.any? && c.empty?
+    AsyncTestScope.new(@@store.select { |r| c.all? { |k,v| r.public_send(k) == v } })
+  end
+  def initialize;        @status = 'running'; @attempt = 0; end
+  def update_columns(a) = a.each { |k,v| public_send(:"#{k}=", v) } && self
+end
+
+class AsyncTestScheduledTask
+  attr_accessor :id, :operation_class, :ctx_data, :run_at, :tags, :state
+
+  @@store = []; @@seq = 0
+  def self.store;   @@store; end
+  def self.reset!;  @@store = []; @@seq = 0; end
+  def self.connection = Struct.new(:adapter_name).new('fake')
+  def self.create!(attrs)
+    obj = new; attrs.each { |k,v| obj.public_send(:"#{k}=", v) if obj.respond_to?(:"#{k}=") }
+    @@seq += 1; obj.id ||= @@seq; obj.state ||= 'scheduled'; @@store << obj; obj
+  end
+  def self.find(id)  = @@store.find { |r| r.id == id }
+  def self.where(*a, **c)
+    return AsyncTestScope.new(@@store) if a.any? && c.empty?
+    AsyncTestScope.new(@@store.select { |r| c.all? { |k,v| r.respond_to?(k) && r.public_send(k) == v } })
+  end
+  def update_columns(a) = a.each { |k,v| public_send(:"#{k}=", v) if respond_to?(:"#{k}=") } && self
+  def initialize; @state = 'scheduled'; end
+end
+
+# Configure Easyop to use the in-memory stubs for this section
+Easyop.configure do |c|
+  c.persistent_flow_model      = 'AsyncTestFlowRun'
+  c.persistent_flow_step_model = 'AsyncTestFlowRunStep'
+  c.scheduler_model            = 'AsyncTestScheduledTask'
+end
+
+# Fake user subject (no real AR needed)
+unless defined?(ActiveRecord)
+  module ActiveRecord; class Base; end; end
+end
+
+class AsyncTestUser < ActiveRecord::Base
+  @@store = {}
+  def self.store        = @@store
+  def self.reset!       = (@@store = {})
+  def self.find(id)     = @@store.fetch(id.to_i) { raise "AsyncTestUser #{id} not found" }
+  def self.create!(attrs)
+    id = (@@store.keys.max || 0) + 1
+    u  = new(id: id, **attrs); @@store[id] = u; u
+  end
+  attr_accessor :id, :email
+  def initialize(id: nil, email:)
+    @id = id; @email = email; @@store[@id] = self if @id
+  end
+end
+
+# Speedrun helper — drives all pending tasks for a flow_run without real clock
+def async_speedrun(flow_run, max: 10)
+  max.times do
+    break if flow_run.terminal?
+    task = AsyncTestScheduledTask.store.find do |t|
+      t.state == 'scheduled' &&
+        Easyop::Scheduler::Serializer.deserialize(t.ctx_data)[:flow_run_id] == flow_run.id
+    end
+    break unless task
+    task.state = 'running'
+    Easyop::PersistentFlow::Runner.execute_scheduled_step!(flow_run)
+  end
+  flow_run.reload
+end
+
+def async_reset!
+  AsyncTestFlowRun.reset!
+  AsyncTestFlowRunStep.reset!
+  AsyncTestScheduledTask.reset!
+  AsyncTestUser.reset!
+end
+
+# ── Mode 2: fire-and-forget async (no subject) ────────────────────────────────
+
+puts "\nMode 2 — fire-and-forget async (no subject)"
+
+class AsyncOp1Test38
+  include Easyop::Operation
+  def call; ctx.step1_done = true; end
+end
+
+class AsyncOp2Test38
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+  def call; ctx.step2_done = true; end
+end
+
+class Mode2FlowTest38
+  include Easyop::Flow
+  flow AsyncOp1Test38, AsyncOp2Test38.async   # no subject → Mode 2
+end
+
+# Capture async calls via the built-in spy (no real ActiveJob needed)
+captured = []
+Thread.current[:_easyop_async_capture]      = captured
+Thread.current[:_easyop_async_capture_only] = true   # capture only, don't execute
+
+mode2_result = Mode2FlowTest38.call(value: 'hello')
+
+Thread.current[:_easyop_async_capture]      = nil
+Thread.current[:_easyop_async_capture_only] = nil
+
+assert mode2_result.is_a?(Easyop::Ctx),   "Mode 2: .call returns Ctx (not FlowRun)"
+assert mode2_result.step1_done == true,    "Mode 2: sync step ran before async step"
+assert captured.size == 1,                 "Mode 2: async step captured (enqueued once)"
+assert captured.first[:operation] == AsyncOp2Test38, "Mode 2: correct op captured"
+
+# ── Mode 3: durable flow with chained async waits (with subject) ──────────────
+
+puts "\nMode 3 — durable flow with chained .async(wait:) steps"
+async_reset!
+
+class Drip1Test38
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async   # needed for .async step-builder on this class
+  def call
+    ctx.drip1_sent = true
+    puts "  [Drip1Test38] sent immediately for user ##{ctx.user.id}"
+  end
+end
+
+class Drip2Test38
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+  def call
+    ctx.drip2_sent = true
+    puts "  [Drip2Test38] sent after wait: 5 for user ##{ctx.user.id}"
+  end
+end
+
+class Drip3Test38
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+  def call
+    ctx.drip3_sent = true
+    puts "  [Drip3Test38] sent after wait: 10 for user ##{ctx.user.id}"
+  end
+end
+
+class DripFlow38
+  include Easyop::Flow
+  subject :user   # triggers Mode 3 — .call returns FlowRun
+  flow Drip1Test38.async,
+       Drip2Test38.async(wait: 5),
+       Drip3Test38.async(wait: 10)
+end
+
+test_user38 = AsyncTestUser.create!(email: 'test@example.com')
+mode3_result = DripFlow38.call(user: test_user38)
+
+assert mode3_result.is_a?(AsyncTestFlowRun), "Mode 3: .call returns FlowRun"
+assert mode3_result.status == 'running',     "Mode 3: initial status is 'running'"
+assert AsyncTestScheduledTask.store.any? { |t| t.state == 'scheduled' },
+       "Mode 3: first async step scheduled immediately"
+
+# Drain all three steps via speedrun
+async_speedrun(mode3_result)
+
+assert mode3_result.status == 'succeeded',  "Mode 3: FlowRun succeeded after all steps"
+
+steps38 = AsyncTestFlowRunStep.store.select { |s| s.flow_run_id == mode3_result.id }
+assert steps38.size == 3,                   "Mode 3: 3 step records created"
+assert steps38.all? { |s| s.status == 'completed' }, "Mode 3: all steps completed"
+
+# Verify steps ran in order and set ctx values
+# (context_data is JSON so we deserialize to check)
+final_ctx = Easyop::Scheduler::Serializer.deserialize(mode3_result.context_data)
+assert final_ctx[:drip1_sent] == true, "Mode 3: drip1 marked in ctx"
+assert final_ctx[:drip2_sent] == true, "Mode 3: drip2 marked in ctx"
+assert final_ctx[:drip3_sent] == true, "Mode 3: drip3 marked in ctx"
+
+remaining_tasks = AsyncTestScheduledTask.store.count { |t| t.state == 'scheduled' }
+assert remaining_tasks == 0, "Mode 3: no pending scheduled tasks after completion"
+
+puts "\nMode 3 subject stored on FlowRun"
+assert mode3_result.subject_type == 'AsyncTestUser', "Mode 3: subject_type stored"
+assert mode3_result.subject_id   == test_user38.id,  "Mode 3: subject_id stored"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 puts "\n" + "=" * 50

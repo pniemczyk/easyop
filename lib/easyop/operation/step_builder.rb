@@ -31,7 +31,7 @@ module Easyop
     class StepBuilder
       PersistentFlowOnlyOptionsError = Class.new(ArgumentError)
 
-      PERSISTENT_FLOW_ONLY_KEYS = %i[skip_if skip_unless on_exception tags].freeze
+      PERSISTENT_FLOW_ONLY_KEYS = %i[skip_if skip_unless on_exception tags blocking].freeze
 
       attr_reader :klass, :opts
 

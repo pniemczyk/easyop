@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`async_retry` macro on operation class** — declare Sidekiq-style retry policy once, on the operation that owns it. `plugin Easyop::Plugins::Async` now exposes `async_retry max_attempts:, wait:, backoff:` (`:constant`, `:linear`, `:exponential`, or callable). Inherited by subclasses. Mode-3 only; ignored in Mode-2 fire-and-forget flows.
+- **`Op.async(blocking: true)` step flag** — when a Mode-3 async step exhausts its retries (or fails with `ctx.fail!`), `blocking: true` at the call site halts the flow and records every remaining step as `'skipped'` in `EasyFlowRunStep`, giving a complete audit trail. Raises `PersistentFlowOnlyOptionsError` in Mode-2 flows.
+- **`Easyop::PersistentFlow::Backoff` module** — pure utility for computing retry delays: `:constant`, `:linear`, `:exponential` (with jitter), and callable strategies.
+- **Precedence rule** — per-step `.on_exception(:reattempt!, max_reattempts: N)` overrides `async_retry` for that specific usage site; existing flows are unaffected.
+
 - **Unified `Easyop::Flow` API** — `include Easyop::Flow` is now the only flow module. Three execution modes are auto-detected:
   - **Mode 1** (no `subject`, no `.async` step): pure sync → returns `Ctx`.
   - **Mode 2** (no `subject`, has `.async` step): sync + fire-and-forget → returns `Ctx`; each async step is enqueued via `klass.call_async` (ActiveJob) and the flow continues immediately to the next step. No AR or Scheduler dependency required.

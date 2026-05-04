@@ -187,4 +187,73 @@ class PluginsAsyncTest < Minitest::Test
     # (ctx is not returned from perform, but call ran)
   end
 
+  # ── async_retry DSL ───────────────────────────────────────────────────────────
+
+  def test_async_retry_stores_config
+    op = make_op
+    op.async_retry(max_attempts: 5, wait: 10, backoff: :linear)
+    cfg = op._async_retry_config
+    assert_equal 5,       cfg[:max_attempts]
+    assert_equal 10,      cfg[:wait]
+    assert_equal :linear, cfg[:backoff]
+  end
+
+  def test_async_retry_defaults
+    op = make_op
+    op.async_retry
+    cfg = op._async_retry_config
+    assert_equal 3,         cfg[:max_attempts]
+    assert_equal 0,         cfg[:wait]
+    assert_equal :constant, cfg[:backoff]
+  end
+
+  def test_async_retry_config_nil_when_not_set
+    op = make_op
+    assert_nil op._async_retry_config
+  end
+
+  def test_async_retry_inherited_by_subclass
+    parent = make_op
+    parent.async_retry(max_attempts: 4, wait: 5, backoff: :exponential)
+    child = Class.new(parent)
+    cfg = child._async_retry_config
+    assert_equal 4,           cfg[:max_attempts]
+    assert_equal :exponential, cfg[:backoff]
+  end
+
+  def test_async_retry_subclass_can_override_parent
+    parent = make_op
+    parent.async_retry(max_attempts: 4, wait: 5, backoff: :exponential)
+    child = Class.new(parent)
+    child.async_retry(max_attempts: 2, wait: 1, backoff: :constant)
+    cfg = child._async_retry_config
+    assert_equal 2,         cfg[:max_attempts]
+    assert_equal :constant, cfg[:backoff]
+    # parent unchanged
+    assert_equal 4, parent._async_retry_config[:max_attempts]
+  end
+
+  def test_async_retry_raises_on_zero_max_attempts
+    op = make_op
+    assert_raises(ArgumentError) { op.async_retry(max_attempts: 0) }
+  end
+
+  def test_async_retry_raises_on_invalid_backoff
+    op = make_op
+    assert_raises(ArgumentError) { op.async_retry(backoff: :unknown) }
+  end
+
+  def test_async_retry_accepts_callable_wait
+    op = make_op
+    fn = ->(attempt) { attempt * 10 }
+    op.async_retry(wait: fn)
+    assert_equal fn, op._async_retry_config[:wait]
+  end
+
+  def test_async_retry_config_is_frozen
+    op = make_op
+    op.async_retry(max_attempts: 2)
+    assert_predicate op._async_retry_config, :frozen?
+  end
+
 end

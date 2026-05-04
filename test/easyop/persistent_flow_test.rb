@@ -795,3 +795,284 @@ class FlowDurableDispatchTest < PersistentFlowTestBase
     end
   end
 end
+
+# ── Backoff module ─────────────────────────────────────────────────────────────
+
+class BackoffComputeTest < Minitest::Test
+  Backoff = Easyop::PersistentFlow::Backoff
+
+  def test_constant_returns_base_regardless_of_attempt
+    assert_equal 5, Backoff.compute(:constant, 5, 1)
+    assert_equal 5, Backoff.compute(:constant, 5, 10)
+  end
+
+  def test_linear_multiplies_base_by_attempt
+    assert_equal 5,  Backoff.compute(:linear, 5, 1)
+    assert_equal 10, Backoff.compute(:linear, 5, 2)
+    assert_equal 15, Backoff.compute(:linear, 5, 3)
+  end
+
+  def test_exponential_result_in_expected_range
+    result = Backoff.compute(:exponential, 5, 1)
+    assert result >= 6,  "expected >= 6, got #{result}"
+    assert result < 36,  "expected < 36, got #{result}"
+  end
+
+  def test_callable_base_overrides_strategy
+    callable = ->(n) { n * 3 }
+    assert_in_delta 12.0, Backoff.compute(:constant, callable, 4), 0.001
+  end
+
+  def test_unknown_strategy_falls_back_to_base
+    assert_equal 7, Backoff.compute(:unknown, 7, 5)
+  end
+
+  def test_zero_wait_returns_zero
+    assert_equal 0, Backoff.compute(:constant, 0, 1)
+  end
+end
+
+# ── async_retry DSL on operation class ────────────────────────────────────────
+
+class AsyncRetryDSLTest < PersistentFlowTestBase
+  def test_async_retry_stores_config
+    op = make_async_op {}
+    op.async_retry(max_attempts: 5, wait: 10, backoff: :linear)
+    cfg = op._async_retry_config
+    assert_equal 5,       cfg[:max_attempts]
+    assert_equal 10,      cfg[:wait]
+    assert_equal :linear, cfg[:backoff]
+  end
+
+  def test_async_retry_inherited_by_subclass
+    parent = make_async_op {}
+    parent.async_retry(max_attempts: 4, wait: 2, backoff: :exponential)
+    child = Class.new(parent)
+    assert_equal 4, child._async_retry_config[:max_attempts]
+  end
+
+  def test_async_retry_raises_on_zero_max_attempts
+    op = make_async_op {}
+    assert_raises(ArgumentError) { op.async_retry(max_attempts: 0) }
+  end
+
+  def test_async_retry_raises_on_invalid_backoff
+    op = make_async_op {}
+    assert_raises(ArgumentError) { op.async_retry(max_attempts: 2, backoff: :random_unknown) }
+  end
+
+  def test_no_async_retry_returns_nil
+    op = make_async_op {}
+    assert_nil op._async_retry_config
+  end
+end
+
+# ── Runner — async_retry + blocking: ──────────────────────────────────────────
+
+class RunnerAsyncRetryTest < PersistentFlowTestBase
+  def test_retry_succeeds_on_third_attempt
+    attempts = 0
+    step_class = make_async_op { attempts += 1; raise 'transient' if attempts < 3 }
+    step_class.async_retry(max_attempts: 3, wait: 0, backoff: :constant)
+    set_const('AR_SucceedStep', step_class)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class
+    end
+    set_const('AR_SucceedFlow', flow)
+
+    run = flow.start!
+    assert_equal 1, attempts
+
+    Easyop::Scheduler.tick_now!
+    assert_equal 2, attempts
+
+    Easyop::Scheduler.tick_now!
+    assert_equal 3, attempts
+    assert_equal 'succeeded', run.status
+    assert_equal 2, flow_steps.count { |s| s.step_index == 0 && s.status == 'failed' }
+    assert_equal 1, flow_steps.count { |s| s.step_index == 0 && s.status == 'completed' }
+  end
+
+  def test_exhausted_retries_without_blocking_fails_flow_only
+    step_class = make_async_op { raise 'always fails' }
+    step_class.async_retry(max_attempts: 2, wait: 0, backoff: :constant)
+    set_const('AR_ExhaustStep', step_class)
+
+    next_step = make_async_op {}
+    set_const('AR_ExhaustNextStep', next_step)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class, next_step
+    end
+    set_const('AR_ExhaustFlow', flow)
+
+    run = flow.start!
+    Easyop::Scheduler.tick_now!
+    assert_equal 'failed', run.status
+    assert_equal 0, flow_steps.count { |s| s.status == 'skipped' }
+  end
+
+  def test_blocking_true_skips_remaining_on_final_failure
+    step_class = make_async_op { raise 'boom' }
+    step_class.async_retry(max_attempts: 2, wait: 0, backoff: :constant)
+    set_const('AR_BlockStep', step_class)
+
+    next_step = make_async_op {}
+    set_const('AR_BlockNextStep', next_step)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.async(blocking: true), next_step.async
+    end
+    set_const('AR_BlockFlow', flow)
+
+    run = flow.start!              # advance! schedules step 0
+    Easyop::Scheduler.tick_now!   # attempt 1 — retry scheduled
+    Easyop::Scheduler.tick_now!   # attempt 2 — max reached, halt + skip
+
+    assert_equal 'failed', run.status
+    skipped = flow_steps.find { |s| s.step_index == 1 && s.status == 'skipped' }
+    refute_nil skipped
+    assert_match 'blocking failure', skipped.error_message
+  end
+
+  def test_blocking_true_single_attempt_skips_all_remaining
+    step_class = make_async_op { raise 'one shot' }
+    set_const('AR_SingleBlockStep', step_class)
+
+    step_b = make_async_op {}
+    set_const('AR_SingleBlockB', step_b)
+
+    step_c = make_async_op {}
+    set_const('AR_SingleBlockC', step_c)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.async(blocking: true), step_b.async, step_c.async
+    end
+    set_const('AR_SingleBlockFlow', flow)
+
+    run = flow.start!
+    Easyop::Scheduler.tick_now!   # attempt 1 — no retries configured, halt + skip
+
+    assert_equal 'failed', run.status
+    assert_equal 2, flow_steps.count { |s| s.status == 'skipped' }
+  end
+
+  def test_blocking_on_last_step_creates_no_skipped_rows
+    step_class = make_async_op { raise 'last fail' }
+    set_const('AR_LastBlockStep', step_class)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.async(blocking: true)
+    end
+    set_const('AR_LastBlockFlow', flow)
+
+    run = flow.start!
+    Easyop::Scheduler.tick_now!
+
+    assert_equal 'failed', run.status
+    assert_equal 0, flow_steps.count { |s| s.status == 'skipped' }
+  end
+
+  def test_ctx_failure_with_blocking_skips_remaining_without_retrying
+    step_class = make_async_op { ctx.fail! }
+    step_class.async_retry(max_attempts: 5, wait: 0, backoff: :constant)
+    set_const('AR_CtxFailBlockStep', step_class)
+
+    next_step = make_async_op {}
+    set_const('AR_CtxFailBlockNext', next_step)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.async(blocking: true), next_step.async
+    end
+    set_const('AR_CtxFailBlockFlow', flow)
+
+    run = flow.start!
+    tasks_after_start = sched_tasks.size   # 1 initial task scheduled
+
+    Easyop::Scheduler.tick_now!
+
+    assert_equal 'failed', run.status
+    assert_equal 1, flow_steps.count { |s| s.step_index == 1 && s.status == 'skipped' }
+    assert_equal tasks_after_start, sched_tasks.size   # no retry tasks added
+  end
+
+  def test_ctx_failure_without_blocking_does_not_skip_remaining
+    step_class = make_async_op { ctx.fail! }
+    step_class.async_retry(max_attempts: 5, wait: 0, backoff: :constant)
+    set_const('AR_CtxNoBlockStep', step_class)
+
+    next_step = make_async_op {}
+    set_const('AR_CtxNoBlockNext', next_step)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.async, next_step.async
+    end
+    set_const('AR_CtxNoBlockFlow', flow)
+
+    run = flow.start!
+    Easyop::Scheduler.tick_now!
+
+    assert_equal 'failed', run.status
+    assert_equal 0, flow_steps.count { |s| s.status == 'skipped' }
+  end
+
+  def test_step_on_exception_overrides_operation_async_retry
+    attempts = 0
+    step_class = make_async_op { attempts += 1; raise 'always fails' }
+    step_class.async_retry(max_attempts: 5, wait: 0, backoff: :constant)
+    set_const('AR_PrecedenceStep', step_class)
+
+    flow = Class.new do
+      include Easyop::PersistentFlow
+      flow step_class.on_exception(:reattempt!, max_reattempts: 1)
+    end
+    set_const('AR_PrecedenceFlow', flow)
+
+    run = flow.start!                  # attempt 1
+    Easyop::Scheduler.tick_now!        # attempt 2 — max_reattempts=1 → halt
+
+    assert_equal 2, attempts
+    assert_equal 'failed', run.status
+  end
+end
+
+# ── StepBuilder blocking: guard ───────────────────────────────────────────────
+
+class StepBuilderBlockingGuardTest < PersistentFlowTestBase
+  def test_blocking_in_persistent_flow_only_keys
+    assert_includes Easyop::Operation::StepBuilder::PERSISTENT_FLOW_ONLY_KEYS, :blocking
+  end
+
+  def test_blocking_raises_when_calling_outside_flow
+    op = make_async_op {}
+    set_const('BlockGuardOp', op)
+
+    builder = op.async(blocking: true)
+    assert_raises Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError do
+      builder.call({})
+    end
+  end
+
+  def test_blocking_in_mode2_flow_raises
+    op = make_async_op {}
+    set_const('BlockMode2Op', op)
+
+    flow = Class.new do
+      include Easyop::Flow
+      flow op.async(blocking: true)
+    end
+    set_const('BlockMode2Flow', flow)
+
+    assert_raises Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError do
+      flow.call
+    end
+  end
+end

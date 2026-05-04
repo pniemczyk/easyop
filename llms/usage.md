@@ -1083,6 +1083,81 @@ Key invariants when implementing a custom bus:
 - Compile patterns once via `_compile_pattern` — don't call `_glob_to_regex` per-publish
 - Never hold the mutex while invoking handlers (snapshot first, then call outside lock)
 
+## 28. `async_retry` — operation-level retry policy
+
+Declares retry behaviour directly on the operation class. Mode-3 durable flows inherit
+it automatically without any change at the call site.
+
+```ruby
+class SendOrderConfirmation < ApplicationOperation
+  # re-raise so unhandled exceptions reach the runner (not converted to ctx.fail!)
+  rescue_from StandardError { |e| raise e }
+
+  async_retry max_attempts: 3, wait: 5, backoff: :exponential
+
+  def call
+    ctx.confirmation_sent_at = Mailer.deliver_confirmation(ctx.order)
+  end
+end
+```
+
+Backoff examples for attempt 1, 2, 3 with `wait: 5`:
+- `:constant` → 5s, 5s, 5s
+- `:linear`   → 5s, 10s, 15s
+- `:exponential` → ~6s, ~21s, ~86s + rand(30)
+
+Callable form for full control:
+
+```ruby
+async_retry wait: ->(attempt) { [2**attempt, 3600].min }
+```
+
+Precedence: per-step `.on_exception(:reattempt!, max_reattempts: N)` in the `flow`
+declaration overrides the operation's `async_retry` config — so existing flows using
+`:reattempt!` continue to work unchanged.
+
+## 29. `blocking: true` — skip downstream steps on final failure
+
+When a step exhausts all `async_retry` attempts (or fails on the only attempt), marking
+it `blocking: true` in the flow records every remaining step as `'skipped'` and sets
+the flow status to `'failed'`. Without it, the flow also fails but leaves no audit trail
+for skipped steps.
+
+```ruby
+class FulfillOrder < ApplicationOperation
+  include Easyop::Flow
+  transactional false
+  subject :order
+
+  flow SendOrderConfirmation.async(blocking: true),   # skips reminder + survey on failure
+       SendEventReminder.async(wait: 24.hours),
+       SendPostEventSurvey.async(wait: 48.hours)
+end
+```
+
+Testing with both features together:
+
+```ruby
+def test_confirmation_failure_skips_downstream
+  # simulate failure on every call
+  SendOrderConfirmation.simulate_failures!(99)
+
+  run = FulfillOrder.call(order: @order)
+  speedrun_flow(run)
+
+  assert_flow_status    run, :failed
+  assert_step_failed    run, SendOrderConfirmation   # 3 failed rows (3 attempts)
+  assert_step_skipped   run, SendEventReminder
+  assert_step_skipped   run, SendPostEventSurvey
+ensure
+  SendOrderConfirmation.reset_simulation!
+end
+```
+
+`ctx.fail!` (deliberate failure) also respects `blocking:` — remaining steps are
+skipped — but does NOT trigger retries. Retries only apply to unhandled exceptions
+that propagate past `rescue_from`.
+
 ## 18. Common mistakes
 
 ```ruby

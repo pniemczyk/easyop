@@ -264,6 +264,44 @@ Priority (highest → lowest): per-call `queue:` argument → `queue` DSL → `p
 
 **Requires:** `ActiveJob::Base` (raises `LoadError` if not available).
 
+### `async_retry` DSL — per-operation retry policy (Mode-3 only)
+
+Declares how many times the durable-flow runner should reschedule a failing async step.
+Intrinsic to the operation class; inherited by subclasses.
+
+```ruby
+class SendOrderConfirmation < ApplicationOperation
+  rescue_from StandardError { |e| raise e }  # must re-raise so runner sees exception
+
+  async_retry max_attempts: 3, wait: 5, backoff: :exponential
+end
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `max_attempts:` | `3` | Total attempts including the first (≥ 1) |
+| `wait:` | `0` | Base seconds between attempts; Numeric, Duration, or callable `(attempt) → seconds` |
+| `backoff:` | `:constant` | `:constant`, `:linear`, `:exponential`, or callable |
+
+Backoff strategies (attempt 1-indexed):
+- `:constant` → always `wait` seconds
+- `:linear` → `wait × attempt` seconds
+- `:exponential` → `attempt⁴ + wait + rand(30)` seconds (Sidekiq-style jitter)
+
+**Reader:** `Op._async_retry_config` returns the frozen config hash, or `nil` if not set.
+
+**Precedence:** `.on_exception(:reattempt!, max_reattempts: N)` in the flow declaration
+overrides `async_retry` on the operation class (call-site wins). Existing flows using
+`:reattempt!` are unaffected.
+
+**`rescue_from` bypass warning:** A base class with `rescue_from StandardError { ctx.fail! }`
+converts exceptions into `Ctx::Failure` before the runner can see them, bypassing
+`async_retry`. Override in the leaf operation:
+
+```ruby
+rescue_from StandardError { |e| raise e }
+```
+
 ## Plugin: Transactional
 
 **Require:** `require "easyop/plugins/transactional"`

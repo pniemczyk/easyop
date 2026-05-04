@@ -536,6 +536,61 @@ class OnboardSubscriber
        SendNudge.async(wait: 3.days)   # flow suspends again for 3 days
 end</code></pre>
 
+      <h3 id="async-retry"><code>async_retry</code> — operation-level retry policy (Mode 3)</h3>
+      <p>Declare how many times the durable-flow runner should reschedule a failing async step. Retry policy is intrinsic to the operation — every durable flow that uses it inherits the policy automatically without any change at the call site.</p>
+      <pre><code class="language-ruby">class SendOrderConfirmation &lt; ApplicationOperation
+  # Must re-raise so exceptions reach the runner instead of being converted to ctx.fail!
+  rescue_from StandardError { |e| raise e }
+
+  async_retry max_attempts: 3,      # total attempts including the first (1 = no retry)
+              wait:         5,       # base delay in seconds
+              backoff:      :exponential  # :constant | :linear | :exponential | callable
+end</code></pre>
+
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Default</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>max_attempts:</code></td><td><code>3</code></td><td>Total attempts including the first; must be ≥ 1</td></tr>
+          <tr><td><code>wait:</code></td><td><code>0</code></td><td>Base delay in seconds; Numeric, Duration, or callable <code>(attempt) → seconds</code></td></tr>
+          <tr><td><code>backoff:</code></td><td><code>:constant</code></td><td><code>:constant</code>, <code>:linear</code>, <code>:exponential</code>, or callable</td></tr>
+        </tbody>
+      </table>
+
+      <p>Backoff strategies (attempt is 1-indexed, starting at 1 for the first retry):</p>
+      <ul>
+        <li><code>:constant</code> — always <code>wait</code> seconds</li>
+        <li><code>:linear</code> — <code>wait × attempt</code> seconds</li>
+        <li><code>:exponential</code> — <code>attempt⁴ + wait + rand(30)</code> seconds (Sidekiq-style jitter)</li>
+        <li>callable — <code>wait.call(attempt)</code> for full control over the delay curve</li>
+      </ul>
+
+      <div class="callout callout-tip">
+        <strong>Precedence:</strong> per-step <code>.on_exception(:reattempt!, max_reattempts: N)</code> in the <code>flow</code> declaration overrides the operation's <code>async_retry</code> config — so existing flows using <code>:reattempt!</code> continue to work unchanged.
+      </div>
+
+      <div class="callout callout-warning">
+        <strong><code>rescue_from</code> bypass:</strong> A base class that does <code>rescue_from StandardError { ctx.fail! }</code> converts exceptions into <code>Ctx::Failure</code> before the runner can see them, bypassing <code>async_retry</code>. Override in the leaf operation with <code>rescue_from StandardError { |e| raise e }</code> to re-raise.
+      </div>
+
+      <pre><code class="language-ruby"># Inheritance — subclasses get the config for free
+class Tickets::BaseMail &lt; ApplicationOperation
+  rescue_from StandardError { |e| raise e }
+  async_retry max_attempts: 3, wait: 5, backoff: :exponential
+end
+
+class Tickets::SendConfirmation &lt; Tickets::BaseMail
+  def call
+    Mailer.deliver_confirmation(ctx.order)
+    ctx.confirmation_sent_at = Time.current
+  end
+end
+
+class Tickets::SendReminder &lt; Tickets::BaseMail
+  async_retry max_attempts: 2, wait: 10, backoff: :linear  # override for this class
+end</code></pre>
+
       <h2 id="transactional">Plugin: Transactional</h2>
       <p>Wraps every operation call in a database transaction. Supports ActiveRecord and Sequel — adapter is detected automatically.</p>
 

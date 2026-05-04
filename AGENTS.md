@@ -74,6 +74,7 @@ test/
     flow_test.rb                   # Flow sequential execution, rollback, guards, nesting
     flow_builder_test.rb           # FlowBuilder on_success/on_failure/bind_with/on
     skip_test.rb                   # skip_if DSL — skip predicate, rollback exclusion
+    persistent_flow_test.rb        # Mode-3 runner, exception policies, async_retry, blocking:, backoff
     events/
       event_test.rb                # Event construction, immutability, to_h
       registry_test.rb             # Registry bus config, register_handler, dispatch, reset!
@@ -83,6 +84,7 @@ test/
         custom_test.rb             # Custom bus: adapter validation, delegation
         adapter_test.rb            # Adapter base: _safe_invoke, _compile_pattern, memoization
     plugins/
+      async_test.rb                # Async plugin: call_async, queue DSL, async_retry DSL, serialization
       events_test.rb               # Events plugin: emits DSL, on:, payload:, guard:, inheritance
       event_handlers_test.rb       # EventHandlers plugin: on DSL, wildcard, async dispatch
       recording_test.rb            # Recording plugin: persist, filter, opt-out, flow tracing, record_result DSL, filter_params DSL
@@ -191,7 +193,7 @@ This key is used in `_start_durable!` to set `subject_type`/`subject_id` on the
 | `Easyop::Flow::DurableSupportNotLoadedError` | `flow.rb` | `subject` declared but `require "easyop/persistent_flow"` omitted |
 | `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | `flow.rb` | Whole flow class wrapped in `.async` (e.g. `Inner.async(wait:)`) |
 | `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | `flow.rb` | `StepBuilder` modifier wraps a durable sub-flow |
-| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `operation/step_builder.rb` | `.on_exception` / `.tags` used in a non-durable flow |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `operation/step_builder.rb` | `.on_exception` / `.tags` / `.async(blocking: true)` used in a non-durable flow |
 
 `AsyncStepRequiresPersistentFlowError` is kept for one release for backward-compat
 `rescue` clauses — it is no longer raised internally.
@@ -217,13 +219,23 @@ called. Bare steps (no modifiers) do not require the plugin.
 
 Key private helpers:
 - `_execute_step!` — runs `instance._easyop_run(ctx, raise_on_failure: true)`;
-  on `Ctx::Failure` marks step + flow_run as `'failed'`; on other exceptions calls
+  on `Ctx::Failure` calls `_halt_and_skip_remaining!`; on other exceptions calls
   `_apply_exception_policy!`.
-- `_apply_exception_policy!` — applies `:cancel!` or `:reattempt!` policy; on
-  `:reattempt!` reschedules via Scheduler, falls back to `'failed'` after
-  `max_reattempts` total failures (counted as `step_model.where(status: 'failed')`).
+- `_apply_exception_policy!` — calls `_resolve_retry_config` to determine max attempts;
+  if more attempts remain, schedules the next retry via `Backoff.compute` + `Scheduler.schedule_at`;
+  otherwise calls `_halt_and_skip_remaining!`.
+- `_resolve_retry_config(step_class, step_opts)` — precedence: `:reattempt!` step opts
+  → operation's `_async_retry_config` → default `{ max_attempts: 1 }`.
+- `_halt_and_skip_remaining!(flow_run, failed_index, step_opts)` — sets
+  `flow_run.status = 'failed'`; if `step_opts[:blocking]`, creates `'skipped'` rows for
+  all remaining steps via `_mark_remaining_steps_skipped!`.
 - `_persist_ctx` / `_rebuild_ctx` — serialize/deserialize ctx via
   `Easyop::Scheduler::Serializer`.
+
+`Easyop::PersistentFlow::Backoff` (`persistent_flow/backoff.rb`) — pure stateless module.
+`Backoff.compute(strategy, base, attempt)` returns delay in seconds.
+Strategies: `:constant` (always `base`), `:linear` (`base * attempt`),
+`:exponential` (`attempt⁴ + base + rand(30)`). Callable `base` is always called as `base.call(attempt)`.
 
 ---
 

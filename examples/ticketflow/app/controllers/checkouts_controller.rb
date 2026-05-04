@@ -8,7 +8,10 @@ class CheckoutsController < ApplicationController
     @event = Event.published.find_by!(slug: params[:event_slug])
 
     Flows::Checkout.prepare
-      .on_success { |ctx| redirect_to order_confirmation_path(ctx.order) }
+      .on_success { |ctx|
+        Flows::EngageAfterCheckout.call(order: ctx.order)
+        redirect_to order_confirmation_path(ctx.order)
+      }
       .on_failure { |ctx|
         flash.now[:alert] = ctx.error
         @ticket_types = @event.ticket_types.reject(&:sold_out?)

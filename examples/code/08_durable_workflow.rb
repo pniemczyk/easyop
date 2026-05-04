@@ -9,6 +9,8 @@
 #   flow steps run durable — ctx persisted across async boundaries
 #   on_exception(:reattempt!, max_reattempts: N) — automatic retry
 #   on_exception(:cancel!)                 — fail immediately on step error
+#   async_retry max_attempts:, backoff:    — operation-level retry policy
+#   Op.async(blocking: true)               — skip remaining steps on final failure
 #   flow_run.cancel!                       — cancel from outside the flow
 #   flow_run.resume!                       — resume a paused flow
 #   Free composition — outer plain flow embeds a durable inner → auto-promotes
@@ -493,5 +495,243 @@ puts "  status:        #{fr7.status}"        # succeeded
 steps7 = FakeFlowRunStep.store.select { |s| s.flow_run_id == fr7.id }
 puts "  step summary:"
 steps7.each { |s| puts "    #{s.operation_class.split('::').last.ljust(28)} #{s.status}" }
+
+# ── Scenario 8: chained .async(wait:) steps — the canonical durable wait chain ─
+
+puts "\nScenario 8 — chained .async(wait:) steps (durable wait chain)"
+reset_all!
+Subscriber.reset!
+
+# Three operations whose execution is separated by wait windows.
+# Each runs in its own scheduled task, with ctx persisted across boundaries.
+class SendDay0Welcome
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  def call
+    puts "  [SendDay0Welcome] welcome email sent to #{ctx.subscriber.email}"
+    ctx.welcome_sent = true
+  end
+end
+
+class SendDay1Tips
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  def call
+    puts "  [SendDay1Tips]    day-1 tips sent  (wait: 60s elapsed)"
+    ctx.tips_sent = true
+  end
+end
+
+class SendDay7Nudge
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  def call
+    puts "  [SendDay7Nudge]   week-1 nudge sent  (wait: 120s elapsed)"
+    ctx.nudge_sent = true
+  end
+end
+
+class WelcomeDrip
+  include Easyop::Flow
+  plugin Easyop::Plugins::Async
+  subject :subscriber   # Mode 3 — .call returns FlowRun
+
+  # Three async steps chained in series, each separated by a wait window.
+  # In production use 1.day / 7.days; small integers used here for speed.
+  flow SendDay0Welcome.async,           # fires immediately
+       SendDay1Tips.async(wait: 60),    # waits 60 seconds
+       SendDay7Nudge.async(wait: 120)   # waits another 120 seconds
+end
+
+sub8  = Subscriber.create!(email: 'hana@example.com', active: true)
+fr8   = WelcomeDrip.call(subscriber: sub8)
+
+puts "  status after .call:         #{fr8.status}"         # running (first task queued)
+puts "  scheduled tasks pending:    #{FakeScheduledTask.store.count { |t| t.state == 'scheduled' }}"  # 1
+
+# speedrun drives all three async steps — each call to execute_scheduled_step!
+# runs one op, persists ctx, then schedules the next task if another async step follows.
+speedrun(fr8)
+
+puts "  status after speedrun:      #{fr8.status}"          # succeeded
+
+steps8 = FakeFlowRunStep.store.select { |s| s.flow_run_id == fr8.id }
+puts "  completed steps:            #{steps8.count { |s| s.status == 'completed' }}"   # 3
+
+# Verify ctx round-tripped correctly across async boundaries
+final_ctx8 = Easyop::Scheduler::Serializer.deserialize(fr8.context_data)
+puts "  ctx.welcome_sent:           #{final_ctx8[:welcome_sent]}"   # true
+puts "  ctx.tips_sent:              #{final_ctx8[:tips_sent]}"      # true
+puts "  ctx.nudge_sent:             #{final_ctx8[:nudge_sent]}"     # true
+
+remaining8 = FakeScheduledTask.store.count { |t| t.state == 'scheduled' }
+puts "  pending scheduled tasks:    #{remaining8}"                  # 0
+
+# ── Scenario 9: Mode 2 contrast — .async steps WITHOUT subject ────────────────
+#
+# When a flow has NO `subject`, it runs in Mode 2 (fire-and-forget):
+#   - .call returns Ctx (not FlowRun)
+#   - Async steps are enqueued via call_async immediately (no persistence)
+#   - There is no FlowRun row, no resume, no ctx round-trip
+#   - wait: on a step DOES work in Mode 2 — it passes the delay to ActiveJob
+#     (so the job fires N seconds later). But it can't suspend/resume like Mode 3.
+#   - on_exception: and tags: are durable-only — raise PersistentFlowOnlyOptionsError
+#
+# Use Mode 2 when you just want a step to happen in the background after
+# the synchronous steps complete (e.g., send an email, emit a webhook).
+# Use Mode 3 (subject) when you need steps to run HOURS apart and resume
+# from persisted ctx — that's what the chained wait chain from Scenario 8 is for.
+
+puts "\nScenario 9 — Mode 2 contrast (no subject, fire-and-forget)"
+reset_all!
+Subscriber.reset!
+
+class QuickEnrich
+  include Easyop::Operation
+
+  def call
+    ctx.enriched = true
+    puts "  [QuickEnrich] sync step ran inline"
+  end
+end
+
+class FireAndForgetNotify
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  def call
+    puts "  [FireAndForgetNotify] async notification sent (background job in production)"
+    ctx.notified = true
+  end
+end
+
+class Mode2DemoFlow
+  include Easyop::Flow
+  flow QuickEnrich,
+       FireAndForgetNotify.async   # no subject → Mode 2
+end
+
+# Capture the async call via the built-in spy so no real ActiveJob is needed
+captured_mode2 = []
+Thread.current[:_easyop_async_capture]      = captured_mode2
+Thread.current[:_easyop_async_capture_only] = true   # capture only, don't execute
+
+mode2_ctx = Mode2DemoFlow.call(name: 'World')
+
+Thread.current[:_easyop_async_capture]      = nil
+Thread.current[:_easyop_async_capture_only] = nil
+
+puts "  .call returns Ctx:          #{mode2_ctx.is_a?(Easyop::Ctx)}"         # true
+puts "  sync step ran:              #{mode2_ctx.enriched}"                    # true
+puts "  async op captured:          #{captured_mode2.first&.dig(:operation)}" # FireAndForgetNotify
+puts "  FlowRun rows created:       #{FakeFlowRun.store.size}"                # 0 — no persistence
+
+# Confirm that durable-only options (on_exception:, tags:) raise an error in Mode 2.
+# These options are only meaningful when a persistent Runner can act on them.
+class BadMode2Flow
+  include Easyop::Flow
+  flow FireAndForgetNotify.async.on_exception(:reattempt!)   # on_exception: is durable-only
+end
+
+begin
+  # Use spy to avoid real ActiveJob dependency
+  Thread.current[:_easyop_async_capture]      = []
+  Thread.current[:_easyop_async_capture_only] = true
+  BadMode2Flow.call
+  puts "  UNEXPECTED: should have raised PersistentFlowOnlyOptionsError"
+rescue Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError => e
+  puts "  on_exception: without subject raises: #{e.class.name.split('::').last}"
+ensure
+  Thread.current[:_easyop_async_capture]      = nil
+  Thread.current[:_easyop_async_capture_only] = nil
+end
+
+# ── Scenario 10: async_retry + blocking: — operation-level retry with flow halt ─
+
+puts "\nScenario 10 — async_retry on operation class + blocking: on flow step"
+reset_all!
+Subscriber.reset!
+
+# Operation declares its own retry policy — 2 total attempts, constant delay.
+class FlakyEmailSender
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  @@fail_count = 0
+  def self.set_failures(n) = (@@fail_count = n)
+  def self.reset_fail_count! = (@@fail_count = 0)
+
+  # Declared on the operation class — not on every flow that uses it.
+  async_retry max_attempts: 2, wait: 0, backoff: :constant
+
+  def call
+    if @@fail_count > 0
+      @@fail_count -= 1
+      raise 'SMTP unavailable'
+    end
+    puts "  [FlakyEmailSender] email sent successfully"
+    ctx.email_sent = true
+  end
+end
+
+class SendSurveyReminder
+  include Easyop::Operation
+  plugin Easyop::Plugins::Async
+
+  def call
+    puts "  [SendSurveyReminder] survey reminder sent"
+    ctx.survey_sent = true
+  end
+end
+
+# Flow: FlakyEmailSender is blocking — if it exhausts retries the remaining
+# async steps are skipped and recorded as such.
+class RetryBlockingFlow
+  include Easyop::Flow
+  subject :subscriber
+
+  flow FlakyEmailSender.async(blocking: true),
+       SendSurveyReminder.async(wait: 3600)
+end
+
+# ── Part A: FlakyEmailSender fails both attempts → flow fails, survey skipped
+
+FlakyEmailSender.set_failures(99)   # always fail
+
+sub10a = Subscriber.create!(email: 'grace@example.com', active: true)
+fr10a  = RetryBlockingFlow.call(subscriber: sub10a)
+
+# advance! schedules the first async step (status: running)
+puts "  [Part A] status after .call: #{fr10a.status}"   # running
+
+# speedrun drives each scheduled task synchronously until terminal or no tasks remain
+speedrun(fr10a)
+
+puts "  [Part A] final status:       #{fr10a.status}"   # failed
+
+email_failures = FakeFlowRunStep.store.count { |s| s.flow_run_id == fr10a.id && s.operation_class.include?('FlakyEmail') && s.status == 'failed' }
+survey_skipped = FakeFlowRunStep.store.count { |s| s.flow_run_id == fr10a.id && s.operation_class.include?('SurveyReminder') && s.status == 'skipped' }
+puts "  [Part A] FlakyEmailSender failures:  #{email_failures}"   # 2
+puts "  [Part A] SendSurveyReminder skipped: #{survey_skipped}"   # 1
+
+# ── Part B: FlakyEmailSender succeeds on 2nd attempt → flow continues normally
+
+reset_all!
+Subscriber.reset!
+FlakyEmailSender.set_failures(1)   # fail once, then succeed on retry
+
+sub10b = Subscriber.create!(email: 'henry@example.com', active: true)
+fr10b  = RetryBlockingFlow.call(subscriber: sub10b)
+
+speedrun(fr10b)   # drives: attempt 1 fails → retry → attempt 2 succeeds → schedules survey
+
+puts "  [Part B] final status:               #{fr10b.status}"   # succeeded
+email_completed = FakeFlowRunStep.store.count { |s| s.flow_run_id == fr10b.id && s.operation_class.include?('FlakyEmail') && s.status == 'completed' }
+puts "  [Part B] FlakyEmailSender completed: #{email_completed}"   # 1
+
+FlakyEmailSender.reset_fail_count!
 
 puts "\n✓ All durable flow demonstrations complete"

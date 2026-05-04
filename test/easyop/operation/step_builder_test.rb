@@ -196,6 +196,17 @@ class StepBuilderTest < Minitest::Test
     end
   end
 
+  def test_call_with_blocking_raises_persistent_flow_only_error
+    builder = @op.async(blocking: true)
+    assert_raises Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError do
+      builder.call(x: 1)
+    end
+  end
+
+  def test_blocking_key_in_persistent_flow_only_keys
+    assert_includes Easyop::Operation::StepBuilder::PERSISTENT_FLOW_ONLY_KEYS, :blocking
+  end
+
   # ── Flow integration — sync steps with guards ────────────────────────────────
 
   def test_step_builder_in_flow_runs_step

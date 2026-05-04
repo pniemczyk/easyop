@@ -63,16 +63,43 @@ module Easyop
           end
 
           _async_ensure_active_job!
-          job = Easyop::Plugins::Async.job_class
-          job = job.set(queue: queue || _async_default_queue)
-          job = job.set(wait: wait)             if wait
-          job = job.set(wait_until: wait_until) if wait_until
-          job.perform_later(name, _async_serialize(merged_attrs))
+          opts = { queue: queue || _async_default_queue }
+          opts[:wait]       = wait       if wait
+          opts[:wait_until] = wait_until if wait_until
+          Easyop::Plugins::Async.job_class.set(**opts).perform_later(name, _async_serialize(merged_attrs))
         end
 
         def _async_default_queue
           @_async_default_queue ||
             (superclass.respond_to?(:_async_default_queue) ? superclass._async_default_queue : "default")
+        end
+
+        # Declare Sidekiq-style retry behaviour for this operation class.
+        # Inherited by subclasses via the same superclass-walking pattern as queue.
+        #
+        # @example
+        #   class Tickets::SendConfirmation < ApplicationOperation
+        #     plugin Easyop::Plugins::Async
+        #     async_retry max_attempts: 3, wait: 5, backoff: :exponential
+        #   end
+        #
+        # @param max_attempts [Integer] total number of attempts (1 = no retry)
+        # @param wait         [Numeric, #to_i, #call] base delay between retries in seconds
+        # @param backoff      [:constant, :linear, :exponential, #call] backoff strategy
+        def async_retry(max_attempts: 3, wait: 0, backoff: :constant)
+          raise ArgumentError, 'max_attempts must be >= 1' if max_attempts < 1
+          unless wait.respond_to?(:call) || wait.respond_to?(:to_i)
+            raise ArgumentError, 'wait must be Numeric, Duration, or callable'
+          end
+          unless wait.respond_to?(:call) || %i[constant linear exponential].include?(backoff)
+            raise ArgumentError, 'backoff must be :constant, :linear, or :exponential'
+          end
+          @_async_retry_config = { max_attempts: max_attempts, wait: wait, backoff: backoff }.freeze
+        end
+
+        def _async_retry_config
+          return @_async_retry_config if defined?(@_async_retry_config) && @_async_retry_config
+          superclass.respond_to?(:_async_retry_config) ? superclass._async_retry_config : nil
         end
 
         # ── Fluent step-builder entry points ────────────────────────────────

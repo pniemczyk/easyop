@@ -129,7 +129,7 @@ module Easyop
                                     error_class:   'Easyop::Ctx::Failure',
                                     error_message: e.message.to_s[0, 500],
                                     finished_at:   Time.current)
-        flow_run.update_columns(status: 'failed', finished_at: Time.current)
+        _halt_and_skip_remaining!(flow_run, index, step_opts)
         raise StepFailed
       rescue StepFailed
         raise
@@ -138,38 +138,81 @@ module Easyop
                                     error_class:   e.class.name,
                                     error_message: e.message.to_s[0, 500],
                                     finished_at:   Time.current)
-        _apply_exception_policy!(flow_run, index, step_opts, e)
+        _apply_exception_policy!(flow_run, index, step_class, step_opts, e)
         raise StepFailed
       end
       private_class_method :_execute_step!
 
-      def self._apply_exception_policy!(flow_run, index, step_opts, _exception)
-        policy = step_opts[:on_exception]
+      def self._apply_exception_policy!(flow_run, index, step_class, step_opts, _exception)
+        if step_opts[:on_exception] == :cancel!
+          _halt_and_skip_remaining!(flow_run, index, step_opts)
+          return
+        end
 
-        case policy
-        when :reattempt!
-          max_reattempts  = step_opts[:max_reattempts] || 3
-          step_model      = Easyop.config.persistent_flow_step_model.constantize
-          attempts_so_far = step_model.where(flow_run_id: flow_run.id,
-                                             step_index:  index,
-                                             status:      'failed').count
+        cfg             = _resolve_retry_config(step_class, step_opts)
+        attempts_so_far = _failed_attempts_count(flow_run, index)
 
-          if attempts_so_far > max_reattempts
-            flow_run.update_columns(status: 'failed', finished_at: Time.current)
-          else
-            Easyop::Scheduler.schedule_at(
-              Easyop::PersistentFlow::PerformStepOperation,
-              Time.current,
-              { flow_run_id: flow_run.id },
-              tags: ["flow_run:#{flow_run.id}"]
-            )
-          end
+        if attempts_so_far < cfg[:max_attempts]
+          delay = Backoff.compute(cfg[:backoff], cfg[:wait], attempts_so_far)
+          Easyop::Scheduler.schedule_at(
+            Easyop::PersistentFlow::PerformStepOperation,
+            Time.current + delay,
+            { flow_run_id: flow_run.id },
+            tags: ["flow_run:#{flow_run.id}"]
+          )
         else
-          # :cancel! or unrecognized policy → fail immediately
-          flow_run.update_columns(status: 'failed', finished_at: Time.current)
+          _halt_and_skip_remaining!(flow_run, index, step_opts)
         end
       end
       private_class_method :_apply_exception_policy!
+
+      # Merge step-level and operation-level retry config, with step-level winning.
+      def self._resolve_retry_config(step_class, step_opts)
+        if step_opts[:on_exception] == :reattempt!
+          max_reattempts = step_opts[:max_reattempts] || 3
+          { max_attempts: max_reattempts + 1, wait: step_opts[:wait] || 0, backoff: :constant }
+        elsif step_class.respond_to?(:_async_retry_config) && step_class._async_retry_config
+          step_class._async_retry_config
+        else
+          { max_attempts: 1, wait: 0, backoff: :constant }
+        end
+      end
+      private_class_method :_resolve_retry_config
+
+      def self._failed_attempts_count(flow_run, index)
+        step_model = Easyop.config.persistent_flow_step_model.constantize
+        step_model.where(flow_run_id: flow_run.id, step_index: index, status: 'failed').count
+      end
+      private_class_method :_failed_attempts_count
+
+      # Mark the flow as failed and optionally record skipped rows for all remaining steps.
+      def self._halt_and_skip_remaining!(flow_run, failed_index, step_opts)
+        flow_run.update_columns(status: 'failed', finished_at: Time.current)
+        _mark_remaining_steps_skipped!(flow_run, failed_index) if step_opts[:blocking]
+      end
+      private_class_method :_halt_and_skip_remaining!
+
+      # Insert a 'skipped' EasyFlowRunStep row for every step that comes after failed_index.
+      def self._mark_remaining_steps_skipped!(flow_run, failed_index)
+        steps      = flow_run.flow_class.constantize._resolved_flow_steps
+        step_model = Easyop.config.persistent_flow_step_model.constantize
+        steps.each_with_index do |entry, idx|
+          next if idx <= failed_index
+          next if entry.is_a?(Proc)
+          step_class, _opts = _resolve_entry(entry)
+          step_model.create!(
+            flow_run_id:     flow_run.id,
+            step_index:      idx,
+            operation_class: step_class.name,
+            status:          'skipped',
+            attempt:         0,
+            started_at:      Time.current,
+            finished_at:     Time.current,
+            error_message:   'skipped due to upstream blocking failure'
+          )
+        end
+      end
+      private_class_method :_mark_remaining_steps_skipped!
 
       def self._resolve_entry(entry)
         if defined?(Easyop::Operation::StepBuilder) && entry.is_a?(Easyop::Operation::StepBuilder)

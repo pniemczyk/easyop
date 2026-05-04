@@ -146,6 +146,74 @@ flow CreateAccount,
 
 `max_reattempts` defaults to 3 when not specified.
 
+## `async_retry` — operation-level retry policy
+
+Declare retry behaviour directly on the **operation class** (not the flow). All durable
+flows that include the operation inherit the policy automatically.
+
+```ruby
+class SendOrderConfirmation < ApplicationOperation
+  # Must re-raise so exceptions reach the runner rather than being converted to ctx.fail!
+  rescue_from StandardError { |e| raise e }
+
+  async_retry max_attempts: 3, wait: 5, backoff: :exponential
+
+  def call
+    Mailer.deliver_confirmation(ctx.order)
+    ctx.confirmation_sent_at = Time.current
+  end
+end
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `max_attempts:` | `3` | Total attempts including the first (must be ≥ 1) |
+| `wait:` | `0` | Base seconds between attempts (Numeric, Duration, or callable `(attempt) → seconds`) |
+| `backoff:` | `:constant` | `:constant`, `:linear`, `:exponential`, or callable |
+
+**Backoff strategies** (attempt is 1-indexed, starting at 1 for the first retry):
+- `:constant` — always `wait` seconds
+- `:linear` — `wait * attempt` seconds
+- `:exponential` — `attempt⁴ + wait + rand(30)` seconds (Sidekiq-style jitter)
+- callable — `wait.call(attempt)` seconds
+
+**Precedence:** per-step `.on_exception(:reattempt!, max_reattempts: N)` in the flow
+declaration overrides the operation's `async_retry` (call-site wins; existing flows
+using `:reattempt!` are unaffected).
+
+**`rescue_from` bypass warning:** A base class that does
+`rescue_from StandardError { ctx.fail! }` converts exceptions to `Ctx::Failure` before
+the runner can see them. `Ctx::Failure` bypasses `async_retry`. Override in the
+operation with `rescue_from StandardError { |e| raise e }` to re-raise.
+
+## `blocking: true` — halt and skip remaining steps on final failure
+
+Set on an individual step in the `flow` declaration. When the step exhausts all retry
+attempts (or has `async_retry max_attempts: 1`), every remaining step is recorded as
+`'skipped'` in `EasyFlowRunStep` and the flow status becomes `'failed'`.
+
+```ruby
+class FulfillOrder < ApplicationOperation
+  include Easyop::Flow
+  transactional false
+  subject :order
+
+  # If confirmation fails all 3 async_retry attempts, reminder + survey are skipped
+  flow SendOrderConfirmation.async(blocking: true),
+       SendEventReminder.async(wait: 24.hours),
+       SendPostEventSurvey.async(wait: 48.hours)
+end
+```
+
+Without `blocking: true`, the flow also fails but subsequent steps leave no
+`EasyFlowRunStep` rows at all (incomplete audit trail).
+
+`ctx.fail!` (deliberate failure) also respects `blocking:` — remaining steps are
+recorded as `'skipped'` — but does NOT trigger retries.
+
+**Mode-2 guard:** `.async(blocking: true)` in a flow without `subject` raises
+`Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` immediately.
+
 ## `subject` precedence rule
 
 `_resolved_subject` returns the effective subject key used when creating the `FlowRun`.

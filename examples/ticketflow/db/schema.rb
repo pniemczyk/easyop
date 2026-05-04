@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_04_15_100000) do
+ActiveRecord::Schema[8.1].define(version: 2026_05_04_100002) do
   create_table "discount_codes", force: :cascade do |t|
     t.boolean "active", default: true, null: false
     t.integer "amount", null: false
@@ -22,6 +22,63 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_15_100000) do
     t.datetime "updated_at", null: false
     t.integer "use_count", default: 0, null: false
     t.index ["code"], name: "index_discount_codes_on_code", unique: true
+  end
+
+  create_table "easy_flow_run_steps", force: :cascade do |t|
+    t.integer "attempt", default: 0, null: false
+    t.datetime "created_at", null: false
+    t.string "error_class"
+    t.string "error_message", limit: 500
+    t.datetime "finished_at"
+    t.integer "flow_run_id", null: false
+    t.string "operation_class", null: false
+    t.datetime "started_at", null: false
+    t.string "status", default: "running", null: false
+    t.integer "step_index", null: false
+    t.datetime "updated_at", null: false
+    t.index ["flow_run_id", "step_index"], name: "idx_efrs_run_step"
+    t.index ["flow_run_id"], name: "index_easy_flow_run_steps_on_flow_run_id"
+  end
+
+  create_table "easy_flow_runs", force: :cascade do |t|
+    t.text "context_data", default: "{}", null: false
+    t.datetime "created_at", null: false
+    t.integer "current_step_index", default: 0, null: false
+    t.datetime "finished_at"
+    t.string "flow_class", null: false
+    t.datetime "started_at"
+    t.string "status", default: "pending", null: false
+    t.bigint "subject_id"
+    t.string "subject_type"
+    t.string "tags"
+    t.datetime "updated_at", null: false
+    t.index ["flow_class"], name: "index_easy_flow_runs_on_flow_class"
+    t.index ["status"], name: "index_easy_flow_runs_on_status"
+    t.index ["subject_type", "subject_id"], name: "idx_efr_subject"
+  end
+
+  create_table "easy_scheduled_tasks", force: :cascade do |t|
+    t.integer "attempts", default: 0, null: false
+    t.datetime "claimed_at"
+    t.string "claimed_by"
+    t.datetime "created_at", null: false
+    t.string "cron"
+    t.text "ctx_data", null: false
+    t.string "dedup_key"
+    t.string "last_error_class"
+    t.text "last_error_message"
+    t.integer "lock_version", default: 0, null: false
+    t.datetime "locked_until"
+    t.integer "max_attempts", default: 3, null: false
+    t.string "operation_class", null: false
+    t.integer "parent_id"
+    t.string "recording_root_reference_id"
+    t.datetime "run_at", null: false
+    t.string "state", default: "scheduled", null: false
+    t.text "tags"
+    t.datetime "updated_at", null: false
+    t.index ["dedup_key"], name: "idx_est_dedup_key", unique: true, where: "dedup_key IS NOT NULL"
+    t.index ["state", "run_at"], name: "idx_est_due"
   end
 
   create_table "events", force: :cascade do |t|
@@ -134,6 +191,7 @@ ActiveRecord::Schema[8.1].define(version: 2026_04_15_100000) do
     t.index ["email"], name: "index_users_on_email", unique: true
   end
 
+  add_foreign_key "easy_flow_run_steps", "easy_flow_runs", column: "flow_run_id"
   add_foreign_key "order_items", "orders"
   add_foreign_key "order_items", "ticket_types"
   add_foreign_key "orders", "discount_codes"

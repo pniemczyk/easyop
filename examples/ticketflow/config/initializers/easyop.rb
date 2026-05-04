@@ -4,11 +4,11 @@ require "easyop/plugins/recording"
 require "easyop/plugins/transactional"
 
 # ── Mode 3 (Durable flows) opt-in ────────────────────────────────────────────
-# Uncomment to enable durable flow support (suspend/resume via DB scheduler).
-# Run `rails g easyop:install` to generate the required migrations.
-#
-# require "easyop/persistent_flow"
-# require "easyop/scheduler"
+# Enables durable flow support: flows with `subject :order` suspend and resume
+# across async steps, persisting ctx in the easy_flow_runs table.
+# Run `bin/rails db:migrate` after adding the migrations to create the tables.
+require "easyop/persistent_flow"
+require "easyop/scheduler"
 
 Easyop.configure do |config|
   config.strict_types = false

@@ -1007,6 +1007,54 @@ flow CreateAccount,
      SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3)  # retry up to 3 times
 ```
 
+### Operation-level retry (`async_retry`)
+
+Retry policy belongs on the operation — it knows what's transient. Declare it once; every durable flow that uses the operation inherits it automatically.
+
+```ruby
+class Tickets::SendConfirmation < ApplicationOperation
+  # Must re-raise so the runner sees the exception (not converted to ctx.fail!)
+  rescue_from StandardError { |e| raise e }
+
+  async_retry max_attempts: 3,      # total attempts including the first (1 = no retry)
+              wait:         5,       # base delay in seconds
+              backoff:      :exponential  # :constant | :linear | :exponential | callable
+end
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `max_attempts:` | `3` | Total attempts including the first (≥ 1) |
+| `wait:` | `0` | Base seconds; Numeric, Duration, or callable `(attempt) → seconds` |
+| `backoff:` | `:constant` | `:constant`, `:linear`, `:exponential`, or callable |
+
+Backoff strategies (attempt is 1-indexed):
+- `:constant` — always `wait` seconds
+- `:linear` — `wait * attempt` seconds
+- `:exponential` — `attempt⁴ + wait + rand(30)` seconds (Sidekiq-style jitter)
+- callable — `wait.call(attempt)` for full control
+
+Precedence: per-step `.on_exception(:reattempt!, ...)` overrides `async_retry` for that usage site, preserving backward compatibility.
+
+> **`rescue_from` bypass:** A base class that does `rescue_from StandardError { ctx.fail! }` converts exceptions to `Ctx::Failure` before the runner can retry them. Override in the operation with `rescue_from StandardError { |e| raise e }` to re-raise so retries kick in.
+
+### Blocking steps (`blocking: true`)
+
+When an async step exhausts its retries (or fails with `ctx.fail!`), pass `blocking: true` at the call site to halt the flow and record every remaining step as `'skipped'`:
+
+```ruby
+class Flows::FulfillOrder < ApplicationOperation
+  include Easyop::Flow
+  subject :order
+
+  flow Tickets::SendConfirmation.async(blocking: true),   # skip the rest if this fails for good
+       Tickets::SendReminder.async(wait: 30.minutes),
+       Tickets::SendSurvey.async(wait: 7.days)
+end
+```
+
+This is a **flow-level** call-site decision — the same operation can be blocking in one flow and non-blocking in another. `blocking:` requires a durable flow (`subject` declared); using it in a Mode-2 flow raises `PersistentFlowOnlyOptionsError`.
+
 ### Free composition
 
 Any flow can embed other flows in its `flow(...)` declaration. Mode-2 sub-flows run as a single inline step. Durable (subject-bearing) sub-flows are flattened into the outer's step list, auto-promoting the outer to Mode 3:

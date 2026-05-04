@@ -184,3 +184,9 @@ end
 puts "\nFree composition — embedded flow shares ctx"
 r = DoubleWithTax.call(raw: '5')
 puts "  #{r.output}"   # 5 × 2 + 10% tax = 10.5
+
+# ── See also ──────────────────────────────────────────────────────────────────
+# 08_durable_workflow.rb — Scenario 7: outer plain flow embeds a durable inner
+#   (inner's `subject` auto-promotes outer; .call returns FlowRun instead of Ctx)
+# 08_durable_workflow.rb — Scenario 8: chained .async(wait: N) steps with subject
+#   (the canonical "durable wait chain" pattern; steps run hours/days apart)

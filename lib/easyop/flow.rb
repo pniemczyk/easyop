@@ -107,7 +107,7 @@ module Easyop
           # Mode 2: fire-and-forget for async steps in non-durable flows.
           # (In Mode 3 flows this path is never reached — the durable Runner drives steps.)
           if step_opts[:async]
-            durable_only = step_opts.keys & %i[on_exception tags]
+            durable_only = step_opts.keys & %i[on_exception tags blocking]
             if durable_only.any?
               raise Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError,
                     "Options #{durable_only.inspect} are only valid inside a durable flow " \
@@ -122,6 +122,8 @@ module Easyop
             next if step_opts[:skip_if]&.call(ctx)
             next if step_opts[:skip_unless] && !step_opts[:skip_unless].call(ctx)
             async_opts = step_opts.slice(:wait, :wait_until, :queue, :at)
+            async_opts[:wait]       = async_opts[:wait].call(ctx)       if async_opts[:wait].respond_to?(:call)
+            async_opts[:wait_until] = async_opts[:wait_until].call(ctx) if async_opts[:wait_until].respond_to?(:call)
             step.call_async(ctx.to_h, **async_opts)
             next
           end

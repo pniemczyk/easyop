@@ -21,6 +21,6 @@ module Flows
          Orders::CreateOrder,
          Orders::ProcessPayment,
          Tickets::GenerateTickets,
-         Tickets::DeliverTickets.async   # Mode 2: enqueued after tickets generated
+         Tickets::DeliverTickets.async(wait: 2.seconds)   # Mode 2: enqueued 2s after tickets are generated
   end
 end

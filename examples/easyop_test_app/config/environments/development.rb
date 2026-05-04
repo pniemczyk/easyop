@@ -54,4 +54,8 @@ Rails.application.configure do
 
   # Raise error when a before_action's only/except options reference missing actions.
   config.action_controller.raise_on_missing_callback_actions = true
+
+  # Use inline adapter so Mode-2 async steps run immediately in development.
+  # Switch to :solid_queue (or :sidekiq) for production-grade durable execution.
+  config.active_job.queue_adapter = :inline
 end

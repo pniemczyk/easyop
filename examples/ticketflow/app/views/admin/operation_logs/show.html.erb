@@ -1,5 +1,9 @@
 <% content_for :page_title, "Execution Tree" %>
 
+<% if @auto_refresh %>
+  <meta http-equiv="refresh" content="3">
+<% end %>
+
 <div class="flex items-center gap-3 mb-6">
   <%= link_to "← All logs", admin_operation_logs_path, class: "text-sm text-gray-500 hover:text-indigo-600" %>
   <span class="text-gray-300">|</span>
@@ -24,6 +28,20 @@
     letting you reconstruct the full call tree.
   </p>
 </div>
+
+<% if @auto_refresh %>
+  <div class="flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl px-5 py-3 mb-6 text-sm text-amber-800">
+    <svg class="w-4 h-4 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+    </svg>
+    <span>
+      <strong>Async steps pending.</strong>
+      This flow has async children that fire after a delay (<code class="bg-amber-100 px-1 rounded">wait:</code> / <code class="bg-amber-100 px-1 rounded">wait_until:</code>).
+      This page refreshes automatically every 3 seconds until all children appear.
+    </span>
+  </div>
+<% end %>
 
 <% # Build a depth map so we can indent each operation visually.
    # Walk the tree: build a hash of reference_id → depth.

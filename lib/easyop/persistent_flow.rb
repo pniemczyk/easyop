@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'scheduler/serializer'
+require_relative 'persistent_flow/backoff'
 require_relative 'persistent_flow/flow_run_model'
 require_relative 'persistent_flow/flow_run_step_model'
 require_relative 'persistent_flow/runner'

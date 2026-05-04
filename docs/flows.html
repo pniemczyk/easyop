@@ -426,6 +426,68 @@ flow_run.resume!  # =&gt; re-advances from the last completed step</code></pre>
      ChargeCard.on_exception(:cancel!),                            # fail immediately on any error
      SendWelcomeEmail.on_exception(:reattempt!, max_reattempts: 3) # retry up to 3 times</code></pre>
 
+      <table>
+        <thead>
+          <tr><th>Policy</th><th>Behavior</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>:cancel!</code> (default)</td><td>Sets <code>flow_run.status = 'failed'</code> immediately</td></tr>
+          <tr><td><code>:reattempt!</code></td><td>Reschedules the step via Scheduler; fails after <code>max_reattempts</code> total failures</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Operation-level retry (<code>async_retry</code>)</h3>
+      <p>Retry policy belongs on the <strong>operation class</strong> — it knows what's transient. Declare it once; every durable flow that uses the operation inherits it automatically.</p>
+      <pre><code class="language-ruby">class SendOrderConfirmation &lt; ApplicationOperation
+  # Must re-raise so the runner sees the exception (not converted to ctx.fail!)
+  rescue_from StandardError { |e| raise e }
+
+  async_retry max_attempts: 3,      # total attempts including the first (1 = no retry)
+              wait:         5,       # base delay in seconds
+              backoff:      :exponential  # :constant | :linear | :exponential | callable
+end</code></pre>
+
+      <table>
+        <thead>
+          <tr><th>Option</th><th>Default</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>max_attempts:</code></td><td><code>3</code></td><td>Total attempts including the first (≥ 1)</td></tr>
+          <tr><td><code>wait:</code></td><td><code>0</code></td><td>Base seconds; Numeric, Duration, or callable <code>(attempt) → seconds</code></td></tr>
+          <tr><td><code>backoff:</code></td><td><code>:constant</code></td><td><code>:constant</code>, <code>:linear</code>, <code>:exponential</code>, or callable</td></tr>
+        </tbody>
+      </table>
+
+      <p>Backoff strategies (attempt is 1-indexed):</p>
+      <ul>
+        <li><code>:constant</code> — always <code>wait</code> seconds</li>
+        <li><code>:linear</code> — <code>wait × attempt</code> seconds</li>
+        <li><code>:exponential</code> — <code>attempt⁴ + wait + rand(30)</code> seconds (Sidekiq-style jitter)</li>
+        <li>callable — <code>wait.call(attempt)</code> for full control</li>
+      </ul>
+
+      <div class="callout callout-tip">
+        <strong>Precedence:</strong> per-step <code>.on_exception(:reattempt!, ...)</code> in the <code>flow</code> declaration overrides the operation's <code>async_retry</code> config — so existing flows using <code>:reattempt!</code> continue to work unchanged.
+      </div>
+
+      <div class="callout callout-warning">
+        <strong><code>rescue_from</code> bypass:</strong> A base class with <code>rescue_from StandardError { ctx.fail! }</code> converts exceptions to <code>Ctx::Failure</code> before the runner sees them, bypassing <code>async_retry</code>. Override in the leaf operation with <code>rescue_from StandardError { |e| raise e }</code> to re-raise.
+      </div>
+
+      <h3>Blocking steps (<code>blocking: true</code>)</h3>
+      <p>When a step exhausts all retry attempts (or fails with <code>ctx.fail!</code>), mark it <code>blocking: true</code> in the <code>flow</code> declaration to halt the flow and record every remaining step as <code>'skipped'</code> in <code>EasyFlowRunStep</code>.</p>
+      <pre><code class="language-ruby">class FulfillOrder &lt; ApplicationOperation
+  include Easyop::Flow
+  transactional false
+  subject :order
+
+  flow SendOrderConfirmation.async(blocking: true),  # skips reminder + survey on final failure
+       SendEventReminder.async(wait: 24.hours),
+       SendPostEventSurvey.async(wait: 48.hours)
+end</code></pre>
+
+      <p>Without <code>blocking: true</code>, the flow still fails but subsequent steps leave no <code>EasyFlowRunStep</code> rows — the audit trail is incomplete. <code>blocking:</code> is a <strong>flow-level call-site decision</strong> — the same operation can be blocking in one flow and non-blocking in another. Using <code>blocking: true</code> in a Mode-2 flow (no <code>subject</code>) raises <code>PersistentFlowOnlyOptionsError</code>.</p>
+
       <h3>Backward compatibility</h3>
       <p><code>include Easyop::PersistentFlow</code> and <code>.start!(attrs)</code> continue to work as deprecated aliases and will be removed in v0.6. Prefer <code>include Easyop::Flow</code> with <code>subject</code>.</p>
 
@@ -477,11 +539,16 @@ run = Outer.call(user: user)    # => FlowRun (not Ctx)</code></pre>
             <td>A durable (Mode 3) subflow is placed after a lambda guard in the outer flow's step list</td>
             <td>Move the guard logic into the subflow itself using <code>skip_if</code>, or restructure the step list</td>
           </tr>
+          <tr>
+            <td><code>PersistentFlowOnlyOptionsError</code></td>
+            <td><code>.on_exception</code>, <code>.tags</code>, or <code>.async(blocking: true)</code> used in a Mode-2 flow (no <code>subject</code>)</td>
+            <td>Add <code>subject :foo</code> to make the flow durable, or remove the durable-only option</td>
+          </tr>
         </tbody>
       </table>
 
       <footer>
-        EasyOp v0.1.7 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
+        EasyOp v0.5.0 &middot; MIT License &middot; <a href="https://github.com/pniemczyk/easyop">GitHub</a>
       </footer>
     </div>
   </main>

@@ -9,6 +9,7 @@ class ApplicationOperation
 
   plugin Easyop::Plugins::Instrumentation
   plugin Easyop::Plugins::Recording, model: OperationLog
+  plugin Easyop::Plugins::Async, queue: 'default'
   plugin Easyop::Plugins::Transactional
 
   rescue_from StandardError do |e|

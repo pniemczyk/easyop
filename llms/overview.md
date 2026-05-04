@@ -50,7 +50,8 @@ lib/
       persistent_flow_assertions.rb    # Easyop::Testing::PersistentFlowAssertions — speedrun_flow, assert_flow_status, …
     persistent_flow.rb         # Easyop::PersistentFlow — deprecated shim; sets @_persistent_flow_compat
     persistent_flow/
-      runner.rb                # Easyop::PersistentFlow::Runner — advance!, execute_scheduled_step!, _apply_exception_policy!
+      runner.rb                # Easyop::PersistentFlow::Runner — advance!, execute_scheduled_step!, _apply_exception_policy!, _resolve_retry_config, _halt_and_skip_remaining!
+      backoff.rb               # Easyop::PersistentFlow::Backoff — pure compute(strategy, base, attempt); :constant/:linear/:exponential + callable
       flow_run_model.rb        # Easyop::PersistentFlow::FlowRunModel — mixin for EasyFlowRun AR model
       flow_run_step_model.rb   # Easyop::PersistentFlow::FlowRunStepModel — mixin for EasyFlowRunStep AR model
       perform_step_job.rb      # Easyop::PersistentFlow::PerformStepJob — optional ActiveJob wrapper
@@ -313,6 +314,64 @@ end
 
 `queue` accepts `Symbol` or `String`. Per-call `queue:` argument always wins.
 
+#### `async_retry` — per-operation retry policy (Mode 3 only)
+
+Declares how many times the runner should reschedule a failing async step before
+giving up. Intrinsic to the operation class; inherited by subclasses.
+
+```ruby
+class SendOrderConfirmation < ApplicationOperation
+  rescue_from StandardError { |e| raise e }  # re-raise so runner sees exceptions
+
+  async_retry max_attempts: 3, wait: 5, backoff: :exponential
+end
+```
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `max_attempts:` | `3` | Total attempts including the first (≥ 1) |
+| `wait:` | `0` | Seconds between attempts (Numeric, Duration, or callable `(attempt) → seconds`) |
+| `backoff:` | `:constant` | `:constant`, `:linear`, `:exponential`, or callable |
+
+Backoff strategies (attempt is 1-indexed):
+- `:constant` — always `wait` seconds
+- `:linear` — `wait * attempt` seconds
+- `:exponential` — `attempt⁴ + wait + rand(30)` seconds (Sidekiq-style jitter)
+
+**Precedence:** per-step `.on_exception(:reattempt!, max_reattempts: N)` in the flow
+declaration overrides the operation's `async_retry` config (call-site wins). Existing
+flows using `:reattempt!` continue to work unchanged.
+
+**`rescue_from` bypass:** `ApplicationOperation`'s `rescue_from StandardError { ctx.fail! }`
+converts exceptions to `Ctx::Failure` before the runner can retry them. Operations that
+need retries must override this with `rescue_from StandardError { |e| raise e }` so the
+real exception propagates to the runner.
+
+#### `blocking: true` — halt and skip on final failure
+
+Set on an individual step in the flow declaration. When the step exhausts all retry
+attempts (or has `async_retry max_attempts: 1`), every remaining step is recorded as
+`'skipped'` in `EasyFlowRunStep` and the flow status becomes `'failed'`.
+
+```ruby
+class FulfillOrder < ApplicationOperation
+  include Easyop::Flow
+  transactional false
+
+  subject :order
+
+  flow SendOrderConfirmation.async(blocking: true),  # skips rest if final failure
+       SendEventReminder.async(wait: 24.hours),
+       SendPostEventSurvey.async(wait: 48.hours)
+end
+```
+
+Without `blocking: true`, a failed step still marks the flow as `'failed'` but no
+`'skipped'` rows are created for subsequent steps (audit trail is incomplete).
+
+`ctx.fail!` (deliberate failure) also respects `blocking:` — skips the remaining steps
+even though it does not trigger retries.
+
 ### Transactional
 
 Wraps `prepare { call }` in an AR/Sequel transaction.
@@ -485,7 +544,7 @@ sub-flow (`_resolved_subject` searches depth-first).
 | `Easyop::Flow::DurableSupportNotLoadedError` | `subject` declared without `require "easyop/persistent_flow"` |
 | `Easyop::Flow::AsyncFlowEmbeddingNotSupportedError` | Whole flow wrapped in `.async` |
 | `Easyop::Flow::ConditionalDurableSubflowNotSupportedError` | Step-builder modifier wraps a durable sub-flow |
-| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `.on_exception` / `.tags` in a non-durable flow |
+| `Easyop::Operation::StepBuilder::PersistentFlowOnlyOptionsError` | `.on_exception` / `.tags` / `.async(blocking: true)` in a non-durable flow |
 
 ### Testing
 
