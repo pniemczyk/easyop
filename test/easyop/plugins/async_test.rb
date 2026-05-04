@@ -187,6 +187,18 @@ class PluginsAsyncTest < Minitest::Test
     # (ctx is not returned from perform, but call ran)
   end
 
+  # ── plugin install ────────────────────────────────────────────────────────────
+
+  def test_plugin_adds_call_async_class_method
+    op = Class.new { include Easyop::Operation }
+    op.plugin(Easyop::Plugins::Async)
+    assert_respond_to op, :call_async
+  end
+
+  def test_job_class_name_is_easyop_plugins_async_job
+    assert_equal 'Easyop::Plugins::Async::Job', Easyop::Plugins::Async.job_class.name
+  end
+
   # ── async_retry DSL ───────────────────────────────────────────────────────────
 
   def test_async_retry_stores_config

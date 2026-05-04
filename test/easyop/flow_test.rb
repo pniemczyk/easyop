@@ -140,6 +140,45 @@ class FlowTest < Minitest::Test
     refute result[:ran]
   end
 
+  # ── .call does not raise on failure ──────────────────────────────────────────
+
+  def test_dot_call_does_not_raise_when_step_fails
+    s1 = make_step(:s1) { ctx.fail! }
+    f  = make_flow(s1)
+    assert_silent { f.call }
+    assert_predicate f.call, :failure?
+  end
+
+  # ── Rollback swallows errors ──────────────────────────────────────────────────
+
+  def test_rollback_errors_are_swallowed
+    s1 = make_step(:s1) { }
+    s1.define_method(:rollback) { raise 'rollback exploded' }
+
+    s2 = make_step(:s2) { ctx.fail! }
+
+    f = make_flow(s1, s2)
+    assert_silent { f.call }
+  end
+
+  # ── on_success / on_failure callbacks ────────────────────────────────────────
+
+  def test_on_success_callback_invoked_after_successful_flow
+    s1       = make_step(:s1) { ctx[:val] = 42 }
+    f        = make_flow(s1)
+    received = nil
+    f.call.on_success { |ctx| received = ctx[:val] }
+    assert_equal 42, received
+  end
+
+  def test_on_failure_callback_invoked_after_failed_flow
+    s1       = make_step(:s1) { ctx.fail!(error: 'x') }
+    f        = make_flow(s1)
+    received = nil
+    f.call.on_failure { |ctx| received = ctx.error }
+    assert_equal 'x', received
+  end
+
   # ── Empty flow ────────────────────────────────────────────────────────────────
 
   def test_empty_flow_returns_success

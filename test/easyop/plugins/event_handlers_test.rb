@@ -30,6 +30,17 @@ class PluginsEventHandlersTest < Minitest::Test
     klass
   end
 
+  # ── Plugin install ────────────────────────────────────────────────────────────
+
+  def test_install_extends_class_with_on_and_registrations
+    op = Class.new do
+      include Easyop::Operation
+      plugin Easyop::Plugins::EventHandlers
+    end
+    assert_respond_to op, :on
+    assert_respond_to op, :_event_handler_registrations
+  end
+
   # ── Basic dispatch ────────────────────────────────────────────────────────────
 
   def test_handler_called_when_matching_event_published
