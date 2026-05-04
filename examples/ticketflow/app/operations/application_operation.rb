@@ -1,3 +1,4 @@
+require "easyop/plugins/async"
 require "easyop/plugins/base"
 require "easyop/plugins/instrumentation"
 require "easyop/plugins/recording"
